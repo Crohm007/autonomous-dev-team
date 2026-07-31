@@ -1127,21 +1127,30 @@ the wrapper MUST:
 1. Capture the merge stderr (truncated to 500 chars).
 2. Post a comment on the **PR** with prefix `Auto-merge failed:` followed by
    the captured excerpt and the directive `Re-dispatching dev agent to
-   rebase onto main.`
-3. Edit the issue: `−reviewing +pending-dev`. Do NOT remove `autonomous`
+   rebase onto main.`, plus the shared full-HEAD marker
+   `<!-- auto-merge-failure: issue=<N> head=<40-lowercase-hex> -->`.
+3. Treat that PR comment as a required recovery write. If it fails, requeue
+   `reviewing -> pending-review` non-substantively; do not dispatch dev without
+   rebase context.
+4. Edit the issue: `−reviewing +pending-dev`. Do NOT remove `autonomous`
    (the dispatcher's `list_pending_dev` selector gates on `autonomous`).
-4. NOT add `+approved`. NOT call `gh issue close`. NOT post a "please
+5. NOT add `+approved`. NOT call `gh issue close`. NOT post a "please
    merge manually" message that hands the work back to a human — auto-merge
    failure is a dev-rebase task, not a human-handoff.
 
-The dev wrapper's resume branch detects the marker by querying PR-issue
-comments for `startswith("Auto-merge failed:")` and prepends a
-`## Pre-implementation: rebase` section to the resume prompt that
-instructs `git fetch origin && git rebase origin/main` before any other
-work. Once the rebase succeeds, the dev wrapper trap transitions back to
-`+pending-review`, the next dispatcher tick re-dispatches review, and the
-merge succeeds — GitHub then closes the issue via the PR's `Closes #N`
-keyword.
+Every dev prompt mode resolves the linked PR and full current HEAD, then reads
+normalized PR comments through `chp_pr_view`. It accepts a body beginning
+`Auto-merge failed:` only when that body also contains either the exact generic
+INV-33 marker for `(issue,current HEAD)` or INV-147's exact confirmed-conflict
+marker for the same tuple. Marker-free legacy INV-33 comments remain accepted
+for backward compatibility; a body carrying either canonical marker prefix must
+match the current tuple. Quoted history, abbreviated SHAs, wrong-issue markers,
+and stale-HEAD markers are ignored.
+A match prepends a `## Pre-implementation: rebase` section instructing
+`git fetch origin && git rebase origin/main` before any other work. Once the
+rebase succeeds, the dev wrapper trap transitions back to `+pending-review`,
+the next dispatcher tick re-dispatches review, and the merge succeeds —
+GitHub then closes the issue via the PR's `Closes #N` keyword.
 
 **Why**: Reproduced live on a downstream consumer at
 2026-05-20T12:17:35–12:17:37Z: review wrapper PASSED, posted "Reviewed
@@ -1222,16 +1231,17 @@ verdict-PASS branch (the auto-merge sub-branch); the merge leaf routes through
   grep tests:
   - TC-AMF-006: zero `gh issue close` calls in the wrapper (regression pin).
   - TC-AMF-002: failure branch sets `+pending-dev` on the issue.
-  - TC-AMF-003: failure branch posts via `gh pr comment` with the
-    `Auto-merge failed:` marker prefix and `Re-dispatching dev`/`rebase
-    onto main` directive.
+  - TC-AMF-003: failure branch posts via `chp_pr_comment` with the
+    `Auto-merge failed:` prefix, the `Re-dispatching dev`/`rebase onto main`
+    directive, and the generic marker bound to issue plus reviewed HEAD.
   - Failure branch keeps `autonomous` (single `--remove-label autonomous`
     occurrence: the success branch only).
   - Old "Review passed but auto-merge failed. Please merge ... manually"
     wording is removed.
-- `tests/unit/test-autonomous-dev-rebase-marker.sh` — verifies the dev
-  wrapper's resume branch detects the marker via `startswith("Auto-merge
-  failed:")` and conditionally injects rebase instructions.
+- `tests/unit/test-autonomous-dev-rebase-marker.sh` and
+  `tests/unit/test-auto-merge-marker-migration.sh` — verify all dev modes
+  require the anchored prefix plus either current-HEAD machine marker and
+  ignore stale, unbound, malformed, wrong-issue, and quoted lookalikes.
 
 **Cross-references**:
 - [INV-32](#inv-32-gh-wrapper-is-installed-on-two-paths-shared-scriptsgh-for-the-agent-per-run-path-dir-for-the-wrapper) —
@@ -1400,7 +1410,7 @@ Where `<short-token>` is one of `bot-timeout`, `ci-transport`, `no-pr-found`, `m
 
 **Cross-references**:
 - [INV-12](#inv-12-resume-only-against-unfinished-sessions) — the hang-prevention invariant this carves out from.
-- [INV-33](#inv-33-review-wrapper-must-not-close-the-linked-issue) + #146 auto-merge-failure handling — INV-35's `failed-substantive` branch composes with #146's resume-prompt rebase prepend (the prepend fires whenever the most recent PR comment matches `Auto-merge failed:`, regardless of whether the next dispatch is dev-resume or dev-new).
+- [INV-33](#inv-33-review-wrapper-must-not-close-the-linked-issue) + #146 auto-merge-failure handling — INV-35's `failed-substantive` branch composes with #146's rebase prepend in every dev mode. The prepend requires an `Auto-merge failed:` prefix plus an exact current-issue/current-HEAD INV-33 or INV-147 machine marker; stale and unbound comments do not activate it.
 - [`docs/designs/inv35-review-aware-resume.md`](../designs/inv35-review-aware-resume.md) — design canvas with the full routing table and verdict-trailer schema.
 - [`dispatcher-flow.md` § Step 4b.5](dispatcher-flow.md#step-4b5-terminal-state-gate-inv-12) — Step 4's runtime view of the routing.
 
@@ -1700,7 +1710,7 @@ Two sub-rules:
 
 1. **Conservative classification.** The ONLY value that yields `proceed` is a case-insensitive `MERGEABLE`. Everything else blocks. This closes the **stale-`UNKNOWN` pass-through**: the prior prompt-side protocol (`references/merge-conflict-resolution.md`) said "after 3 retries still UNKNOWN → treat as MERGEABLE and proceed", which let a status GitHub had not finished computing be silently approved. An empty string (from a failed `gh pr view`) also blocks — fail-closed.
 
-2. **UNKNOWN retry budget in the wrapper.** GitHub computes `mergeable` asynchronously, so the wrapper polls `gh pr view --json mergeable` up to `MERGEABLE_RETRIES` (default 3, 10s apart) while the value is UNKNOWN/empty, then classifies the settled value once. A value that never settles is `block-nonsubstantive` (re-queue), never `proceed`.
+2. **UNKNOWN retry budget in the wrapper.** GitHub computes `mergeable` asynchronously, so the wrapper polls `gh pr view --json mergeable` up to `MERGEABLE_RETRIES` (default 3), waiting `MERGEABLE_RETRY_DELAY_SECONDS` (default 10 seconds) between attempts while the value is UNKNOWN/empty, then classifies the settled value once. A value that never settles is `block-nonsubstantive` (re-queue), never `proceed`.
 
 **Routing rationale**: the gate routes to the existing `pending-dev` state (keeping `autonomous`) rather than introducing a new label — no new state-machine node, only a new *reason* for the existing `reviewing → pending-dev` transition. For `CONFLICTING`, the `Auto-merge failed:` PR marker gives the conflict a deterministic owner: the dev-resume branch ([`dev-agent-flow.md`](dev-agent-flow.md), [INV-33](#inv-33-review-wrapper-must-not-close-the-linked-issue)) detects that marker and prepends a mandatory `git rebase origin/main && git push --force-with-lease` pre-step. For `UNKNOWN`, no PR marker is posted (there may be no real conflict, so an unconditional rebase would be wasteful); the `failed-non-substantive` trailer makes the dispatcher's `handle_completed_session_routing` flip the issue back to `pending-review` (re-review) under the `REVIEW_RETRY_LIMIT` cap ([INV-35](#inv-35-review-aware-resume-routing-for-completed-sessions)).
 
@@ -4394,7 +4404,7 @@ _Triage (issue #236): [machine-checked: tests/unit/test-spec-drift.sh]_
 
 1. **Generated diagram** — the mermaid block in [`state-machine.md`](state-machine.md) is generated FROM `transitions.json` by `scripts/gen-state-machine.sh` (marker-delimited region). Hand-editing inside the markers, or editing the table without regenerating, fails CI (`gen-state-machine.sh --check` diffs and exits non-zero).
 2. **Guard/action mapping** — every `guard`/`action` token in `transitions.json` maps (via [`spec-guard-map.json`](spec-guard-map.json)) to a named function or greppable predicate that MUST still resolve in `lib-dispatch.sh` / the wrappers. A token with no mapping, or a mapped anchor that no longer resolves, fails CI naming the pair. (The map keys on function names + grep-stable literals, NEVER line numbers.)
-3. **Label-write-site completeness** — five sub-checks (plus a variable-write ban) over every literal `label_swap` and direct `itp_transition_state` arg + every `--add/--remove-label` literal in the six pipeline files. **C.1 vocabulary**: each label literal written must appear in `transitions.json` as a state or `actions[]` entry (catches a brand-new label, e.g. a typo). **C.2 movement**: each write *site*'s `(removes→adds)` movement — the set it removes plus the set it adds, normalized as `<sorted-removes>|<sorted-adds>` — must equal the `(remove-label:…, add-label:…)` actions of some transition (catches a write that reuses *known* labels in an **undeclared combination**, e.g. `label_swap "$n" "approved" "stalled"`). **C.3 code-site coverage**: C.2 is movement-*set* membership, so two transitions sharing one movement make a row's deletion invisible. [`spec-codesite-map.json`](spec-codesite-map.json)'s `code_sites` pins every **code-bearing** transition (actor ∉ {maintainer, github}) to a grep-stable anchor, checked both ways — *forward* (anchor still greps) and *reverse* (every key is a live transition id); deleting `dispatch-pending-dev-pr-exists` (movement shared with `dispatch-review-aware-reroute-review`) orphans its entry → **CI red**. **C.4 discovered-site reconciliation**: a NEW site whose movement already exists elsewhere passes C.2/C.3, so C.4 requires the count of literal write sites per `(file, movement)` to equal the count of `spec-codesite-map.json`'s `sites[]` manifest entries — an added/removed/duplicate site drifts the count → **CI red**. **C.5 per-site anchor adjacency**: C.4 is a *count*, so RELOCATING a write within a file (same movement, count unchanged) is invisible; each `sites[]` entry's `anchor` must therefore grep **exactly once** AND have a write of its `movement` within ±8 lines — moving the `label_swap "$n" "pending-dev" "pending-review"` out of `handle_pending_dev_pr_exists()` leaves its anchor with no adjacent write → **CI red**. **P1.1 variable-write ban**: a variable-valued `--add/--remove-label "$x"` is a hard **CI red** (not a NOTE) unless its enclosing function is in `variable_write_allowlist`, which is currently empty because `label_swap` and `hygiene_strip_residual_labels` now delegate to `itp_transition_state` — a variable write could inject an undeclared label invisibly. (C.4/C.5 counts are over CODE SITES, not rows: one site can back several rows and one row can collapse several physical paths, so the count is the stable quantity.) Together C.1+C.2+C.3+C.4+C.5 + the ban make "a PR adding (even a duplicate / shared-movement / relocated / variable) or removing a label-write site without the matching transitions.json entry fails CI" actually hold. Each fails CI with an actionable message naming the orphan label / undeclared movement / orphaned-or-unmapped transition / stale-or-ambiguous anchor / unaccounted-or-count-mismatched site / relocated write / non-allowlisted variable write.
+3. **Label-write-site completeness** — five sub-checks (plus a variable-write ban) over every literal `label_swap` and direct `itp_transition_state` arg + every `--add/--remove-label` literal in the seven pipeline files. **C.1 vocabulary**: each label literal written must appear in `transitions.json` as a state or `actions[]` entry (catches a brand-new label, e.g. a typo). **C.2 movement**: each write *site*'s `(removes→adds)` movement — the set it removes plus the set it adds, normalized as `<sorted-removes>|<sorted-adds>` — must equal the `(remove-label:…, add-label:…)` actions of some transition (catches a write that reuses *known* labels in an **undeclared combination**, e.g. `label_swap "$n" "approved" "stalled"`). **C.3 code-site coverage**: C.2 is movement-*set* membership, so two transitions sharing one movement make a row's deletion invisible. [`spec-codesite-map.json`](spec-codesite-map.json)'s `code_sites` pins every **code-bearing** transition (actor ∉ {maintainer, github}) to a grep-stable anchor, checked both ways — *forward* (anchor still greps) and *reverse* (every key is a live transition id); deleting `dispatch-pending-dev-pr-exists` (movement shared with `dispatch-review-aware-reroute-review`) orphans its entry → **CI red**. **C.4 discovered-site reconciliation**: a NEW site whose movement already exists elsewhere passes C.2/C.3, so C.4 requires the count of literal write sites per `(file, movement)` to equal the count of `spec-codesite-map.json`'s `sites[]` manifest entries — an added/removed/duplicate site drifts the count → **CI red**. **C.5 per-site anchor adjacency**: C.4 is a *count*, so RELOCATING a write within a file (same movement, count unchanged) is invisible; each `sites[]` entry's `anchor` must therefore grep **exactly once** AND have a write of its `movement` within ±8 lines — moving the `label_swap "$n" "pending-dev" "pending-review"` out of `handle_pending_dev_pr_exists()` leaves its anchor with no adjacent write → **CI red**. **P1.1 variable-write ban**: a variable-valued `--add/--remove-label "$x"` is a hard **CI red** (not a NOTE) unless its enclosing function is in `variable_write_allowlist`, which is currently empty because `label_swap` and `hygiene_strip_residual_labels` now delegate to `itp_transition_state` — a variable write could inject an undeclared label invisibly. (C.4/C.5 counts are over CODE SITES, not rows: one site can back several rows and one row can collapse several physical paths, so the count is the stable quantity.) Together C.1+C.2+C.3+C.4+C.5 + the ban make "a PR adding (even a duplicate / shared-movement / relocated / variable) or removing a label-write site without the matching transitions.json entry fails CI" actually hold. Each fails CI with an actionable message naming the orphan label / undeclared movement / orphaned-or-unmapped transition / stale-or-ambiguous anchor / unaccounted-or-count-mismatched site / relocated write / non-allowlisted variable write.
 
 The typed inputs the guards read are enumerated in [`observation-snapshot.md`](observation-snapshot.md) (schema: [`schemas/observation-snapshot.schema.json`](schemas/observation-snapshot.schema.json)), including the SSM-indeterminate third liveness state ([INV-30]).
 
@@ -7734,6 +7744,16 @@ INV-128, the next free slot after main's INV-127.
 - `non_idempotent_comment_count`: total comments MINUS comments matching `_LIVENESS_IDEMPOTENT_PATTERN` — a single grep-able list covering every known idempotent-notice/marker grammar this repo's breakers/self-heal paths post (`stale-verdict:`, `INV-12-completed:`, `INV-12-no-pr-fresh-dev:`, `INV-35-fresh-dev:`, `no-progress-substantive(-attempt)?:`, `non-actionable-finding:`, `self-heal-lost-session:`, `self-heal-non-substantive:`, `crashed-session-retry:`, `crashed-session-non-actionable:`, `dispatcher-convergence-breaker:`, `dispatcher-gate-fail-breaker:`, `dispatcher-token:`, `INV-25-hygiene:`, the watchdog's own `dispatcher-liveness-watchdog:`, and — [round 6] since the tier-1/tier-2 human-readable reports are now separate comments from the bare marker (see below) — `reason=liveness-no-progress`/`reason=liveness-timeout` themselves) — a park's first notice must NOT reset the clock, or the park would never be detected (the exact failure mode this invariant exists to close). **[codex review, PR #472, round 8 BLOCKING #2]** Every grammar is matched with a leading wrapper anchor (requiring a backtick code span or an HTML-comment opening immediately before the token) — the pre-round-8 bare alternation was an unanchored substring test that a human comment merely discussing or quoting a token in prose (e.g. "I saw reason=liveness-timeout mentioned somewhere") satisfied identically to a genuine wrapped marker/report, wrongly EXCLUDING that prose comment from the count. **[codex review, PR #472, round 10 BLOCKING]** The round-8 anchor only required the wrapper's OPENING delimiter — a backtick or `<!--` immediately before the token — with no check that the span ever CLOSED, so a human comment that opened a wrapper but never closed it (e.g. "I saw `` `reason=liveness-timeout `` mentioned somewhere, never closed") still satisfied the pattern identically to a genuine, well-formed marker/report line, reopening the SAME masking-real-progress bug via an unclosed span instead of a bare mention. Fixed by requiring BOTH delimiters of the SAME span — `` `(TOKEN)[^`\n]*` `` for the backtick form, `` <!--[ \t]*(TOKEN)[^\n]*--> `` for the HTML-comment form, each token sub-pattern its own capturing group since Oniguruma has no branch-reset group syntax — matching the exact producer shape (a closed, single-line span) rather than a mere look-alike opening. Every genuine producer in this codebase already emits a closed span this way, so the anchor rejects no genuine marker/report — only bare-prose mentions and now also unclosed forgeries. **[codex review, PR #472, round 9 BLOCKING #1]** The round-8 wrapper anchor closed the bare-prose gap but left an inconsistency: `_liveness_marker_digest`/`_liveness_prior_marker` both additionally gate on `_liveness_strict_author_flag` (app-mode-only `authorKind` filter), but `_liveness_non_idempotent_count` had no such gate at all — in `GH_AUTH_MODE=app`, a HUMAN comment that merely wraps a known token correctly (e.g. `` `reason=liveness-timeout` ``) still satisfied the anchor and was masked as idempotent, undercounting genuine human progress. The fix reclassifies (not excludes) an untrusted match: a comment counts as non-idempotent progress if its body doesn't match any known grammar, OR it matches but was posted by an `authorKind == "human"` author AND `GH_AUTH_MODE=app` — deliberately the mirror of the digest's own gate (which excludes an untrusted match from registering *presence*; here an untrusted match must not be silently dropped from the count, it must count as real progress instead). In `GH_AUTH_MODE=token` the added disjunct is always false — behavior is byte-for-byte unchanged, preserving the documented token-mode residual (a human posting a byte-for-byte CLOSED span identical to the genuine producer shape remains indistinguishable from the real thing in `GH_AUTH_MODE=token`, unchanged by round 10 — the same class [INV-105]'s round-14 finding already documents). **[issue #473]** Rounds 6-10 converted the classification anchor incrementally (bare substring → opening-wrapper → closed-span) but never past a PER-TOKEN span — a human comment that merely QUOTES a closed, well-formed span around a known token (e.g. "please see `` `reason=liveness-timeout` `` for context") still satisfied every round-10 anchor exactly as well as the genuine producer's own report, so it remained wrongly excluded from the count. `_LIVENESS_IDEMPOTENT_PATTERN`/`_LIVENESS_DIGEST_PATTERN` (the per-token alternations above) are REPLACED by `_LIVENESS_GRAMMARS_JSON` (`lib-liveness.sh`) — one WHOLE-BODY regex PER PRODUCER (18 entries: the 14 breaker/self-heal grammars, the watchdog's own marker, the two liveness reports, and `no-progress-substantive-attempt:` broken out from `no-progress-substantive:` since they are genuinely distinct producer shapes), each built directly from that producer's actual `itp_post_comment` call site with every fixed word/punctuation/Markdown byte-matched and only the producer's own interpolated variables generalized to the narrowest matching character class. A comment counts as ANY known grammar ONLY when its body matches, start to end (`^...$`, with `[\s\S]*?` spanning the one genuinely free-text evidence line the two multi-line breaker reports each embed) — a quoted, prefixed, or partially-reproduced token no longer matches, full stop, closing the residual gap every prior round narrowed but never eliminated. The accepted token-mode residual is UNCHANGED IN KIND (not newly introduced): a human posting a byte-for-byte copy of a genuine producer's ENTIRE body is still indistinguishable from the real thing in `GH_AUTH_MODE=token` — [INV-105]'s round-14 precedent, now just anchored to the full body instead of a token span. Pinned by TC-LIVENESS-084 (`tests/unit/test-liveness-watchdog.sh`).
 - `marker_digest`: a sorted, comma-joined digest of which of those SAME grammars are PRESENT — a NEW grammar appearing is progress (a different breaker took an action) even though that same grammar's comment is excluded from the count above. Uses a SEPARATE pattern, `_LIVENESS_DIGEST_PATTERN`, that excludes the watchdog's OWN marker specifically: the watchdog posts a bare marker on essentially every evaluated tick (unconditionally on the `none` path, R3's requirement mirroring [INV-122]'s "computed and posted on EVERY round" fix), so including it in the digest would flip the digest exactly once (empty → present) and then hold that component constant forever afterward — a one-time false "progress" signal that then permanently pollutes the fingerprint with a component carrying no further information. This was caught and fixed during implementation (an earlier version used one shared pattern for both the count exclusion and the digest, which self-defeated: the watchdog's tick-1 marker changed the digest on tick 2, so two genuinely-identical park ticks in a row never actually produced the same fingerprint). **[round 6]** The authorKind filter (`authorKind != "human"`, mirroring [INV-105]/[INV-122]'s own marker-authenticity filter) is applied via `_liveness_strict_author_flag` ONLY when `GH_AUTH_MODE=app` — see the counter-persistence paragraph below for the full rationale (this replaced an earlier `BOT_LOGIN`-presence check, which is never true at this call site in ANY `GH_AUTH_MODE` and so could never gate anything). **[codex review, PR #472, round 8 BLOCKING #2]** `_LIVENESS_DIGEST_PATTERN` carries the SAME wrapper anchor as `_LIVENESS_IDEMPOTENT_PATTERN`, for the identical reason: without it, a human comment merely quoting/discussing a grammar prefix in prose (e.g. "quoting the marker: dispatcher-convergence-breaker: issue=1 head=abc") would falsely register that grammar as PRESENT — a false "progress" signal usable to reset the watchdog's clock on demand. **[codex review, PR #472, round 10 BLOCKING]** As with the count pattern above, the round-8 anchor required only the OPENING wrapper delimiter — an unclosed backtick/HTML-comment opening (e.g. "quoting the marker: `` ` ``dispatcher-convergence-breaker: issue=1 head=abc, never closed") still falsely registered the grammar as present. Fixed identically: BOTH delimiters of the span are now required, one capturing group per alternative branch. The extraction (`_liveness_marker_digest`'s `scan()` call) was updated from `.[-1]` (which assumed a single shared capture position) to filtering the null out of each match's own 2-element result and taking the remaining (non-null) value — since exactly one of the two alternative-specific groups is populated per match, never both. **[issue #473]** ALL LIVENESS COMMENT READS NOW USE WHOLE-BODY CANONICAL GRAMMAR MATCHING: `_LIVENESS_DIGEST_PATTERN` is likewise replaced by a `digest == true` filter over `_LIVENESS_GRAMMARS_JSON`'s per-producer whole-body entries (15 of the 18 — every entry EXCEPT the watchdog's own marker and the two liveness reports themselves, for the identical self-referential-pollution reason above). The round-10 `scan()`/null-filtering extraction is no longer needed: whole-body match already identifies WHICH producer matched (`$g.name`), since the grammar list is keyed one-entry-per-producer rather than one-entry-per-token with shared alternation branches. The SAME first-line-forgery gap the count side closed applies here too: a comment whose FIRST LINE is a canonical marker (e.g. a well-formed `<!-- dispatcher-token: ... -->`) but whose remainder is arbitrary prose no longer registers that grammar as present. `_liveness_newest_pointer` (the tier-2 report's best-effort "newest session report / verdict" DISPLAY pointer) is explicitly OUT OF SCOPE and remains an unanchored substring test — it gates no progress/fingerprint/authenticity decision, sources from arbitrary agent/review-wrapper free text with no canonical whole-body shape to anchor against, and a false match there degrades a display hint, never INV-128's actual guarantees; see that function's own docstring (`lib-liveness.sh`) for the full audit rationale. Pinned by TC-LIVENESS-085, plus TC-LIVENESS-086..094 (full-body fixture coverage — including `dispatcher-gate-fail-breaker:`, previously untested against its real producer text — for the 9 `_LIVENESS_GRAMMARS_JSON` entries TC-LIVENESS-006..085 exercised only indirectly).
 
+**INV-147 extension**: the dev conflict-context guard adds the strict,
+whole-body `dev-conflict-context-read-failed:` producer. The current roster is
+therefore 19 grammars total and 16 digest-eligible; the 18/15 counts in the
+issue-#473 historical text above describe the pre-INV-147 baseline. Duplicate
+copies of the same issue/HEAD marker do not change either fingerprint input.
+This registration is classification consistency and defense in depth, not the
+terminal bound: each wrapper attempt also emits a non-idempotent session report,
+which changes the overall fingerprint. INV-147 therefore consumes the marker
+through its direct current-attempt, same-HEAD `pending-dev -> stalled` route.
+
 Fingerprint unchanged across a tick = a **no-op tick**.
 
 **Counter + tier-1 latch persistence**: `<!-- dispatcher-liveness-watchdog: issue=<N> fingerprint=<hash> count=<n> tier1=<0|1> tripped=<0|1> -->`, posted/updated on EVERY evaluated tick (mirrors [INV-122]'s "computed and posted on EVERY round, not only on a trip" requirement — without this, the very first no-op tick would leave no marker for the second to find, and the counter could never advance in normal operation). **[round 6]** The marker is ALWAYS posted as its OWN bare comment — the tier-1/tier-2 human-readable reports (below) never embed it as their first line. **[round 8]** `tripped` is a FIELD ADDED to the marker, `1` on the marker posted as part of a tier-2 transition and `0` on every other tick — see the cutoff paragraph below for why. Read back via `_liveness_prior_marker` (`lib-liveness.sh`) — the LAST comment STRUCTURALLY anchored on the marker's own exact grammar, a WHOLE-BODY anchor (`^<!-- dispatcher-liveness-watchdog: ... -->[[:space:]]*$`, tolerating only trailing whitespace — a genuine marker's entire body is always just the marker) that falls STRICTLY AFTER the cutoff (see the cutoff paragraph below). Fingerprint match → `count = min(stored.count + 1, stall_ticks)` (capped — see the count-cap paragraph below), `tier1 = stored.tier1` (latch persists); fingerprint mismatch → `count = 1`, `tier1 = 0` (full reset — a genuinely new episode gets a fresh tier-1 warning even on a head/label that previously tripped tier 1 before recovering). A malformed, absent, or non-matching marker collapses to `count=0` (bias to MISS, never a crash).
@@ -7913,7 +7933,7 @@ are otherwise unchanged: only decided rounds post a marker at all (never
 `_AGGREGATE_SUBSTANTIVE_FAIL` (an all-timeout-veto `fail` still posts no
 marker, same as before #475).
 
-Every one of the wrapper's seven `failed-non-substantive` exit paths
+Every one of the wrapper's seven legacy `failed-non-substantive` exit paths
 (`no-pr-found`, `e2e-evidence-missing`, `smoke-config-error`,
 `awaiting-bot-review`, `mergeable-unknown`, `merge-conflict-unresolvable`,
 `other`) ALSO posts its own `round=0` marker immediately after its
@@ -7932,6 +7952,14 @@ change (issue #475 round 1): without this, a silently-failed
 no reset signal at all, so the next substantive fail could inherit the stale
 pre-reset marker and prematurely narrow the ratchet's blocking floor — the
 unsafe direction.
+
+INV-147 extends the same rule to its helper-owned preflight exits. Stable
+preflight `mergeable-unknown` posts `round=0` after its required verdict and
+before `pending-dev`; `head-changed`, `mergeable-read-failed`,
+`preflight-write-failed`, and `auto-merge-marker-write-failed` post `round=0`
+after their best-effort verdict and before `pending-review`. These paths
+short-circuit before aggregation, so they cannot rely on the aggregate PASS
+reset site.
 
 **INV-127's `_aggregate_has_p0p1_fail` gate: unchanged, re-documented (not
 re-purposed)**: `_aggregate_has_p0p1_fail` (`lib-review-aggregate.sh`) and
@@ -9380,5 +9408,168 @@ invariant.
 **Cross-reference**:
 [`docs/designs/block-commit-command-context.md`](../designs/block-commit-command-context.md)
 defines the full helper contract and repository decision table.
+
+---
+
+## INV-147: a HEAD-pinned mergeability preflight routes known conflicts before E2E and produces strict durable disposition evidence
+
+_Triage (issue #236): [machine-checked: tests/unit/test-review-disposition.sh, tests/unit/test-review-mergeability-preflight.sh, tests/unit/test-dispatcher-review-disposition-routing.sh, tests/unit/test-handle-completed-routing-golden-trace.sh]_
+
+**Rule**: after resolving and linkage-verifying an open PR, the review wrapper
+captures provider-normalized state, full HEAD, and branch; polls
+`chp_mergeable` with the existing bounded `MERGEABLE_RETRIES`; then captures
+state and full HEAD again before acting. This preflight precedes both command
+and browser INV-46 E2E entry points. Invalid retry-count or retry-delay
+configuration falls back to bounded numeric defaults and cannot terminate a
+`set -e` caller.
+
+A stable `MERGEABLE` HEAD emits no disposition and continues unchanged. A
+stable `CONFLICTING` HEAD skips E2E/fan-out and enters the canonical conflict
+route. Persistent `UNKNOWN`/empty on a stable known HEAD skips E2E/fan-out,
+emits `failed-non-substantive cause=mergeable-unknown`, and routes through
+`pending-dev` for INV-35's bounded re-review. A closed/merged PR reuses INV-54
+remove-only cleanup. A changed HEAD emits no stale evidence and requeues to
+`pending-review` with `cause=head-changed`; an unreadable snapshot likewise
+requeues without asserting a HEAD-bound disposition.
+
+The pre-fan-out producer contract is exactly:
+
+```text
+<!-- review-disposition: issue=<N> head=<40-lowercase-hex> phase=pre-fanout result=<conflict-rebase|mergeable-unknown> -->
+```
+
+Only a whole-body strict-self marker for the active issue, a normalized full
+provider HEAD, the literal phase, and an allow-listed result is valid. Human
+lookalikes, quotes, malformed/trailing text, abbreviated SHAs, and wrong-issue
+markers do not route. `Reviewed HEAD:` retains its INV-04 meaning and
+`last_reviewed_head` remains unchanged. The dispatcher instead selects the
+newest valid strict evidence by `(createdAt,id)` across both contracts that
+matches the current full HEAD for Step 4 routing, then delegates to the existing
+INV-35/INV-85/INV-98 router. When strict author projection is
+unavailable or its provider read fails, the helper returns a distinct
+operational-defer result: `pending-dev` remains unchanged, no dispatch/attempt
+marker is emitted, and the issue is not added to `JUST_DISPATCHED`, allowing
+INV-128 to bound a persistent failure. Only a successful read with no valid
+evidence takes the safe first-review path. It never falls back to
+unauthenticated `Reviewed HEAD:` parsing. Older-head evidence cannot suppress
+review of a new HEAD. Canonical disposition and Reviewed-HEAD anchors are
+write-once per tuple. If routing history moves A -> B -> A, current-head
+filtering reuses the existing A anchor instead of duplicating it. The required
+verdict carries `head=<40-lowercase-hex>`, must match the affected HEAD, and
+must be newer than the latest routing evidence of any head and any same-head
+INV-85 `no-progress-substantive-attempt:<head>` boundary. A second same-head
+conflict therefore emits a fresh verdict and reaches INV-85 rather than
+reusing stale evidence, including an identical verdict for an intervening
+HEAD, or being misclassified as an INV-12 no-verdict handoff. Generic verdict
+producers remain unbound; shared classification accepts the optional token
+without changing verdict semantics. Routing candidates and freshness checks
+derive their indices from one strict-self timeline that excludes malformed
+timestamps. The authenticated verdict grammar allows each optional `cause`,
+`dev-actionable`, and `head` key at most once in canonical renderer order;
+duplicate or contradictory bindings are not routing evidence.
+
+The pending-dev delegation pins its matched routing HEAD through every terminal
+route. The completed-session router re-reads the PR once before acting and
+reuses the snapshot for its substantive decision. The no-session and
+unconfirmed-session recovery paths likewise re-read immediately after their
+no-live-wrapper gate and before verdict-aware recovery. A changed or unreadable
+HEAD returns to `pending-review` without dispatching dev or recording an INV-85
+attempt against the new HEAD. Callers that do not supply this optional routing
+HEAD retain the original INV-04 `last_reviewed_head` consumer unchanged.
+
+Preflight and post-fan-out INV-44 confirmed conflicts share one canonical
+action helper: a required blocking issue finding naming `BASE_BRANCH`, an
+idempotent HEAD-bound PR comment beginning `Auto-merge failed:`, a
+`failed-substantive dev-actionable=true head=<full-head>` trailer, best-effort
+native request changes, and `reviewing -> pending-dev`. Preflight additionally persists
+`result=conflict-rebase`. The disposition, PR marker, and verdict trailer are
+required durable inputs; the blocking finding is also required before either
+route can transition. Post-fan-out additionally repairs a missing strict-self
+`Reviewed HEAD:` anchor before writing the verdict. All return codes are
+checked, writes are idempotent per `(issue,HEAD,result)`, and `pending-dev` is
+unreachable until they succeed.
+A required-write failure requeues non-substantively to `pending-review` so the
+missing write remains retryable. A final transition failure does not set
+`RESULT_PARSED`; cleanup may retry the intended movement without manufacturing
+an evidence-free `pending-dev` route or duplicating the already-durable required
+verdict trailer. Each required-write phase arms
+`pending-review` cleanup before its first write and changes that intent to
+`pending-dev` only after the helper confirms all routing inputs are durable.
+Thus an interruption between writes also remains retryable.
+
+The later INV-44 poll is retained as the race-closing authority for a base
+update during E2E/fan-out. It re-reads PR state and full HEAD after polling and
+acts only if the PR is still open at the reviewed HEAD; close, HEAD-change, and
+read-failure outcomes emit no stale conflict evidence. After dispatching one
+conflict-rebase dev attempt, the completed-session router uses the pinned
+routing HEAD; an unchanged failed rebase therefore reaches INV-85 `stalled`,
+while a successful `git push --force-with-lease` advances HEAD and returns
+through one normal preflight/E2E/review round.
+
+Every dev prompt mode resolves the linked PR, its normalized current HEAD, and
+the canonical HEAD-bound `Auto-merge failed:` comment before ordinary work.
+The provider-neutral comments read is complete; GitHub page-walks the
+issue-comments endpoint so routing evidence after comment 100 remains visible.
+The comment must end with either the exact confirmed-conflict marker
+`auto-merge-conflict` or INV-33's separate generic `auto-merge-failure` marker,
+both rendered by `lib-review-disposition.sh` for the current `(issue,HEAD)`.
+This preserves ordinary post-approval merge-failure recovery without weakening
+the conflict marker's meaning. Marker-free legacy INV-33 comments remain a
+backward-compatible fallback only when the body contains no case-insensitive
+marker lookalike. Quoted, malformed, terminal-newline, wrong-issue, and stale
+canonical markers do not activate the prompt. A matching marker prepends the
+mandatory rebase block.
+Failure to read any of that provider context prepends
+a mandatory fail-closed recovery block instead: the agent must re-read the
+current context before implementation. If the read remains unavailable, it
+posts exactly one whole-body
+`<!-- dev-conflict-context-read-failed: issue=<N> head=<40-lowercase-hex> -->`
+comment, with no surrounding prose, and exits without changing code. The
+marker HEAD is pinned first to the provider-resolved PR HEAD, then to the newest
+strict machine-authored issue routing evidence (`conflict-rebase` disposition
+or `Reviewed HEAD`) when PR resolution itself failed. It is never derived from
+bare `git rev-parse HEAD` in `PROJECT_DIR`, because that checkout ordinarily
+points at the base branch. If neither trusted source supplies a full HEAD, the
+agent must enter and validate an issue-bound PR worktree; without one it reports
+the provider failure without a marker rather than guessing. After validating
+one, it scopes `git rev-parse HEAD` to that worktree and posts the resulting full
+SHA in the canonical marker.
+
+The dispatcher trusts that marker only when it follows the latest trusted dev
+dispatch token and matches the unchanged reviewed full HEAD. On a
+`failed-substantive` route, both a completed session and a
+completion-unprovable Codex/non-Claude session transition directly from
+`pending-dev` to `stalled`; no additional `dev-new` or crash-recovery dispatch
+is allowed. The completed route also consumes the strict current-HEAD
+`conflict-rebase` disposition when the normal classifier returns `none`,
+because the preflight's required substantive verdict necessarily predates the
+guarded dev session. A stale-attempt marker is ignored; comments sharing one
+provider timestamp second are ordered by the normalized monotone comment ID.
+The marker is also one of INV-128's whole-body idempotent grammars, but the
+direct route is load-bearing: the wrapper's session report changes the generic
+liveness fingerprint on every attempt. INV-122 remains defense in depth, not
+the first known-conflict handler.
+
+**Producer**:
+`autonomous-review.sh`, `lib-review-mergeable.sh`,
+`lib-review-disposition.sh`, `lib-review-verdict.sh`, and `autonomous-dev.sh`.
+
+**Consumer**:
+`lib-dispatch.sh::handle_pending_dev_pr_exists` and
+`handle_completed_session_routing`.
+
+**Status**: **ENFORCED**.
+
+**Test**:
+`docs/test-cases/e2e-conflict-preflight.md` maps
+`TC-E2E-REBASE-001..071` across strict marker parsing, the complete preflight
+matrix, required-write faults/idempotency, canonical conflict parity,
+dispatcher convergence, GitHub/GitLab provider fixtures, and retained
+INV-44/INV-46/INV-98/INV-122 regressions.
+
+**Cross-references**:
+- [INV-04](#inv-04-reviewed-head-trailer-format) - fan-out-produced HEAD evidence remains unchanged.
+- [INV-35](#inv-35-review-aware-resume-routing-for-completed-sessions) / [INV-85](#inv-85-the-completed-session-failed-substantive-route-is-bounded-to-one-dev-new-per-unchanged-head-a-no-progress-or-bot-unfixable-finding-escalates-to-stalled-never-loops) / [INV-98](#inv-98-the-step-4a5-same-head-pr-exists-park-is-not-terminal--a-completed-session-delegates-to-the-inv-35-router-only-the-residual-cases-park) - unchanged-HEAD routing and convergence.
+- [INV-44](#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) / [INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) / [INV-54](#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass) - retained post-fan-out, E2E, and closed-PR authorities.
 
 ---

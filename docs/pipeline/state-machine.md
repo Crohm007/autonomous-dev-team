@@ -48,6 +48,11 @@ reviewing --> stalled: severity ratchet's P0/P1 floor still failing after REVIEW
 reviewing --> stalled: all reviewers unavailable for REVIEW_UNAVAILABLE_CAP consecutive rounds [INV-144]
 reviewing --> pending_dev: Review wrapper verdict FAIL
 reviewing --> pending_dev: Review wrapper PASS but auto-merge failed (INV-33)
+reviewing --> pending_dev: Stable pre-fan-out CONFLICTING HEAD skips E2E/fan-out and requests rebase [INV-147]
+reviewing --> pending_dev: Stable pre-fan-out mergeability UNKNOWN skips E2E/fan-out for bounded re-review [INV-147]
+reviewing --> pending_review: HEAD changed during preflight or post-fan-out mergeability polling [INV-147]
+reviewing --> pending_review: Mergeability decision could not revalidate pinned state and HEAD [INV-147]
+reviewing --> pending_review: Required conflict-routing write failed; retry idempotently [INV-147]
 reviewing --> pending_dev: Review wrapper PASS but PR CONFLICTING (mergeable gate, INV-44)
 reviewing --> pending_dev: Review wrapper PASS but mergeable UNKNOWN (mergeable gate, INV-44)
 reviewing --> stalled: E2E hard gate FAIL repeated on unchanged (head, rc) >= GATE_FAIL_STALL_THRESHOLD [INV-122]
@@ -62,6 +67,7 @@ pending_dev --> pending_review: Step 4 review-aware (completed session + non-sub
 pending_dev --> pending_review: Step 4 PR-exists short-circuit (a PR already references this issue)
 pending_dev --> in_progress: Step 4a.5 self-heal (same-HEAD FAILED verdict + no resolvable session id + no live wrapper -> bounded dev-new) [INV-111]
 pending_dev --> in_progress: Step 4a.5 crashed-session recovery (same-HEAD FAILED verdict + resolved session id whose completion is unprovable + no live wrapper -> bounded dev-new) [INV-125]
+pending_dev --> stalled: Step 4 current dev attempt cannot read conflict context on unchanged reviewed HEAD [INV-147]
 pending_dev --> stalled: Dispatcher Step 4 (retries at MAX)
 pending_dev --> stalled: Step 4 review-aware (non-substantive review-retry cap reached) [INV-35]
 pending_dev --> stalled: Step 4 review-aware (completed session + substantive review failure, no HEAD progress or bot-unfixable) [INV-85]
