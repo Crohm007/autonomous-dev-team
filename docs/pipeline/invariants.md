@@ -9620,6 +9620,28 @@ check armed:
 - `canonical_remote_url` returning non-zero (nothing comparable remains), or no
   resolvable remote for the named operand.
 
+The destination and trunk-ref parsers must classify push options identically
+before their first positional operand. Bare `--signed` consumes no following
+token. `--repo` supplies a repository value, including its `--repo=<value>`
+form, but a later positional repository overrides it. `-o` / `--push-option`,
+`--receive-pack`, and `--exec` always consume a separate value. Git also lets
+bare `--recurse-submodules` consume the next token when it is a valid mode
+(`check`, `on-demand`, `only`, `no`, or `false`); modelling that
+value-dependent arity is outside [INV-146]'s deliberately bounded grammar, so
+both Layer-1 parsers continue to treat the bare option as one token.
+`--flag=value` forms also consume one token. If `parse_push_remote_operand` and
+`parse_push_target_refspec` disagree within this bounded model, the destination
+check can inspect one token while the trunk check inspects another.
+
+The unmodelled `--recurse-submodules <mode>` form leaves a pre-existing residual
+gap: the parsers interpret `<mode>` as the repository operand, so a remote named
+after a valid mode that resolves to an unrelated destination can make Layer 1
+allow a command that Git actually sends to the following repository operand.
+This change does not widen that gap. Ordinarily the mode is not a configured
+remote, destination resolution remains unknown, and the trunk check stays
+armed. Layer 2 reads Git's pre-push stdin protocol rather than argv, and Layer 3
+enforces protection server-side, so neither shares this parsing limitation.
+
 **Uncertainty never grants a trunk push.**
 
 `canonical_remote_url` normalizes away scheme, userinfo, port, the SSH
@@ -9682,15 +9704,16 @@ pre-push hook emitted by `install-git-pre-push.sh` is **unaffected** — it is
 self-contained by design, installed inside the repository it guards, and so has
 no cross-repository question to answer.
 
-**Scope note**: this governs only *whether a push is in scope*. The trunk-ref
-parsing (`parse_push_target_refspec` / `is_trunk_ref`, [INV-17]) and the
-`BASE_BRANCH` → `TRUNK_BRANCH` → `main` resolution chain ([INV-131]) are
-unchanged. Hooks remain zero-dependency shell: they read only what the wrapper
-exported and never parse conf.
+**Scope note**: destination comparison still governs only *whether a push is in
+scope*. Its operand classification is kept in parity with trunk-ref parsing
+(`parse_push_target_refspec` / `is_trunk_ref`, [INV-17]) so both decisions see
+the same command boundary. The `BASE_BRANCH` → `TRUNK_BRANCH` → `main`
+resolution chain ([INV-131]) is unchanged. Hooks remain zero-dependency shell:
+they read only what the wrapper exported and never parse conf.
 
 **Status**: **ENFORCED**.
 
-**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..27`, 56 assertions) —
+**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..34`, 74 assertions) —
 the 11 pre-existing #64 cases unchanged, plus TC-BP-13b (bare push from inside
 the wiki), TC-BP-13c (no anchor → fail closed), TC-BP-16 (second clone of this
 project's remote, all three command shapes), TC-BP-17 (five URL spellings),
@@ -9699,6 +9722,14 @@ cross-spelling match, unrelated entry, empty value, and a glob-shaped entry
 pinned **non-vacuously** by planting a cwd file the pattern would expand onto),
 and TC-BP-25 (both wrappers export the anchor — dropping it is fail-closed, so
 nothing else would catch it).
+
+TC-BP-28..34 pin the mirrored push-option grammar: bare `--signed` leaves the
+remote visible to both parsers, `--repo` preserves its value and positional
+override precedence, `-o` still consumes its value, `--signed=<value>` remains
+one token, and the bounded handling of invalid-mode and valid-mode
+`--recurse-submodules` forms remains conservative when no mode-named remote
+resolves. The `--repo` cases run through the hook, not only the helper, so the
+production destination-check call path is covered.
 
 TC-BP-20..24, 26, 27 pin the fail-closed rule against the ways two earlier cuts
 of this change violated it. Every one was a **verified** bypass or false
