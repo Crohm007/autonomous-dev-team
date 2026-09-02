@@ -1498,6 +1498,32 @@ EOF
     fi
   fi
 
+
+  # [INV-142] When this DEV invocation started from an existing linked PR and
+  # successfully advanced that same PR to a new authoritative HEAD, persist a
+  # machine-authored handoff receipt before terminal budget cleanup. The receipt
+  # is recovery evidence only; failure to write it never weakens the hard cap.
+  if [[ $exit_code -eq 0 && "${PR_EXISTS:-0}" -gt 0 \
+        && -n "${PR_NUM:-}" && -n "${DEV_PR_HEAD_SHA:-}" ]]; then
+    _dev_handoff_info=""
+    if _dev_handoff_info=$(_teardown_call resolve_pr_for_issue \
+        "$ISSUE_NUMBER" "number,headRefOid" 2>/dev/null) \
+        && jq -e --argjson pr "$PR_NUM" \
+          '.number == $pr and (.headRefOid | type == "string")' \
+          >/dev/null 2>&1 <<<"$_dev_handoff_info"; then
+      _dev_handoff_post_head=$(jq -r '.headRefOid' <<<"$_dev_handoff_info")
+      _dev_handoff_post_head=$(_review_normalize_full_head "$_dev_handoff_post_head") \
+        || _dev_handoff_post_head=""
+      if [[ -n "$_dev_handoff_post_head" \
+            && "$_dev_handoff_post_head" != "$DEV_PR_HEAD_SHA" ]]; then
+        _teardown_call itp_post_comment "$ISSUE_NUMBER" \
+          "<!-- dev-pr-handoff-v1: issue=${ISSUE_NUMBER} pr=${PR_NUM} session=${SESSION_ID} run=${RUN_ID:-unknown} pre-head=${DEV_PR_HEAD_SHA} post-head=${_dev_handoff_post_head} -->" \
+          2>/dev/null || log "WARNING: Failed to persist DEV PR-head handoff evidence"
+      fi
+    fi
+    unset _dev_handoff_info _dev_handoff_post_head
+  fi
+
   # [INV-111] (#402 review round-1 [P1]) re-arm before the label-flip write —
   # the final load-bearing `gh`-touching write in this function.
   rearm_gh_resolution

@@ -133,6 +133,19 @@ assert_grep "TC-TOKENBUDGET-077 ISSUE_TOKEN_BUDGET documented" \
 assert_grep "TC-TOKENBUDGET-077 TOKEN_BUDGET_MODE documented" \
   '^# TOKEN_BUDGET_MODE=' "$CONF"
 
+echo "== TC-TOKENBUDGET-086: durable DEV PR-head handoff evidence =="
+DEV_WRAPPER="skills/autonomous-dispatcher/scripts/autonomous-dev.sh"
+if grep -Fq "dev-pr-handoff-v1" "$DEV_WRAPPER"; then
+  pass "TC-TOKENBUDGET-086 dev wrapper persists authoritative PR-head handoff evidence"
+else
+  fail "TC-TOKENBUDGET-086 dev wrapper must persist authoritative PR-head handoff evidence"
+fi
+if grep -Fq "DEV_PR_HEAD_SHA" "$DEV_WRAPPER" && grep -Fq "post-head" "$DEV_WRAPPER"; then
+  pass "TC-TOKENBUDGET-086 handoff evidence binds pre-head and post-head"
+else
+  fail "TC-TOKENBUDGET-086 handoff evidence must bind pre-head and post-head"
+fi
+
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]] || exit 1
