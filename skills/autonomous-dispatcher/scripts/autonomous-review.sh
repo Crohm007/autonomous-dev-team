@@ -2039,6 +2039,10 @@ _AGENT_PGIDS_E2E=""
 if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
   _E2E_LANE_DIR=$(mktemp -d "/tmp/agent-review-e2e-${ISSUE_NUMBER}-XXXXXX")
   _E2E_RC_FILE="${_E2E_LANE_DIR}/e2e.rc"
+  # Optional integration-owned classification for a non-zero lane result.
+  # Both command and browser lanes inherit this wrapper-private path. Producers
+  # should atomically rename a complete regular file into place.
+  export E2E_FAILURE_CLASSIFICATION_FILE="${_E2E_LANE_DIR}/e2e-failure-classification"
   log "INV-46: running the E2E lane ONCE before the review fan-out (mode=${E2E_MODE})."
   case "${E2E_MODE:-none}" in
     command)
@@ -2135,6 +2139,11 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
     fi
   fi
   E2E_GATE=$(_classify_e2e_gate "$_e2e_lane_rc" "$_e2e_evidence_present")
+  _e2e_dev_actionable="true"
+  if [[ "$_e2e_lane_rc" -ne 0 ]]; then
+    _e2e_dev_actionable=$(_e2e_failure_actionability \
+      "$_E2E_LANE_DIR" "$E2E_FAILURE_CLASSIFICATION_FILE")
+  fi
   log "INV-46: E2E hard gate: lane_rc=${_e2e_lane_rc}, evidence_present=${_e2e_evidence_present} → gate=${E2E_GATE}"
 
   # Capture the lane PGID for the reaper / SIGTERM trap (alongside fan-out PGIDs).
@@ -2199,12 +2208,27 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
     # repo collaborator able to comment on the issue could pre-seed a forged
     # marker at a high count and force the NEXT genuine failure to trip the
     # breaker prematurely.
-    _gf_prior_marker=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null \
-      | jq -r '[.[] | select(.authorKind != "human") | select(.body | contains("dispatcher-gate-fail-breaker:"))] | sort_by(.createdAt) | last | .body // ""' \
-      2>/dev/null || echo "")
+    # Read once for breaker history and the existing INV-85 proof that a
+    # substantive DEV correction was actually dispatched for this exact HEAD.
+    # A failed read becomes [] and therefore cannot cause a premature stall;
+    # downstream required routing writes remain fail-closed.
+    _gf_comments=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null || echo "[]")
+    _gf_prior_marker=$(jq -r \
+      '[.[] | select(.authorKind != "human") | select(.body | contains("dispatcher-gate-fail-breaker:"))] | sort_by(.createdAt) | last | .body // ""' \
+      2>/dev/null <<<"$_gf_comments" || echo "")
+    _gf_correction_consumed=$(_gate_breaker_correction_consumed \
+      "$_gf_comments" "$PR_HEAD_SHA")
     _gf_next_count=$(_gate_breaker_next_count "$_gf_prior_marker" "$PR_HEAD_SHA" "$_e2e_lane_rc")
     _gf_threshold=$(_gate_breaker_threshold)
     _gf_marker=$(_gate_breaker_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$_e2e_lane_rc" "$_gf_next_count")
+    # INV-150/INV-92 owns actionability. The breaker may preempt only a
+    # dev-actionable failure after the same-HEAD correction opportunity was
+    # actually consumed. dev-actionable=false flows through the required
+    # disposition/verdict route so INV-92 stays the sole no-DEV stall owner.
+    _gf_trip_eligible="false"
+    if [[ "$_e2e_dev_actionable" == "true" ]] && [[ "$_gf_correction_consumed" == "true" ]]; then
+      _gf_trip_eligible="true"
+    fi
     # [#453 codex review round-2, P1] NO may_stall_now / lib-dispatch.sh
     # liveness pre-gate here (unlike INV-105's dispatcher-side call). That
     # predicate's dispatch-marker-freshness check exists so the DISPATCHER
@@ -2227,7 +2251,8 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
     # empty on a chp_pr_view failure. An empty head is not "the same head" —
     # it's "we don't know the head" — so a fingerprint keyed on it must never
     # satisfy the same-HEAD safety condition this breaker exists to enforce.
-    if [[ "$_gf_already_stalled" != "true" ]] && [[ -n "$PR_HEAD_SHA" ]] && [[ "$_gf_next_count" -ge "$_gf_threshold" ]]; then
+    if [[ "$_gf_already_stalled" != "true" ]] && [[ -n "$PR_HEAD_SHA" ]] && [[ "$_gf_next_count" -ge "$_gf_threshold" ]] \
+       && [[ "$_gf_trip_eligible" == "true" ]]; then
       log "[#453] same-HEAD gate-fail breaker TRIPPED: head=${PR_HEAD_SHA} rc=${_e2e_lane_rc} count=${_gf_next_count} (threshold=${_gf_threshold}) — halting re-dispatch, transitioning to stalled."
       # Transition FIRST, atomically — mirrors INV-105's TOCTOU fix (a
       # failed transition aborts under set -euo pipefail BEFORE RESULT_PARSED
@@ -2299,19 +2324,28 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 1. **[BLOCKING] E2E verification failed** — the wrapper ran the project E2E once before review (INV-46) and it did NOT pass (lane exit code ${_e2e_lane_rc}). See the E2E failure comment on PR #${PR_NUMBER}. The review agents were NOT run because a failing E2E is a hard gate. Fix the failure and push; the next review round re-runs E2E.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)
 
 ${_gf_marker}" 2>/dev/null || true
-    # INV-92 (#298): a failing E2E is a dev-actionable code defect (fail-open).
-    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "true" 2>/dev/null || true
-
-    # INV-52: a failed E2E hard gate is a dev-actionable blocking FAIL — assert
+    # Persist strict same-HEAD routing evidence and the authoritative INV-92
+    # actionability trailer before pending-dev becomes observable. Either write
+    # failing aborts this route closed; cleanup must not fabricate a dispatchable
+    # pending-dev state without the evidence its consumer requires.
+    # INV-52: a failed E2E hard gate is a substantive blocking FAIL — assert
     # it on the PR's GitHub-native state too (reviewDecision → CHANGES_REQUESTED),
     # symmetric with the agent-findings and CONFLICTING substantive routes.
     # Best-effort; the E2E `block-nonsubstantive` (evidence-missing) re-queue
     # below deliberately does NOT request changes (transient, not a code defect).
     submit_request_changes "$PR_NUMBER" \
-      "E2E verification failed (lane exit code ${_e2e_lane_rc}): the wrapper ran the project E2E once before review (INV-46) and it did NOT pass. See the E2E failure comment on PR #${PR_NUMBER}, fix the failure, and push — reviewDecision is set to CHANGES_REQUESTED until a new review with a passing E2E (INV-52)." \
-      || log "WARNING: submit_request_changes returned non-zero (unexpected — helper is best-effort); continuing the FAIL route."
+      "E2E verification failed (lane exit code ${_e2e_lane_rc}): the wrapper ran the project E2E once before review (INV-46) and it did NOT pass. See the E2E failure comment on PR #${PR_NUMBER}; reviewDecision is set to CHANGES_REQUESTED until a new review with a passing E2E (INV-52)." \
+      || log "WARNING: submit_request_changes returned non-zero (best-effort); continuing the E2E FAIL route."
 
-    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
+    _e2e_route_rc=0
+    _review_route_e2e_failure \
+      "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$_e2e_dev_actionable" \
+      || _e2e_route_rc=$?
+    if [[ "$_e2e_route_rc" -ne 0 ]]; then
+      log "ERROR: required E2E failure route failed (rc=${_e2e_route_rc}); refusing to report a pending-dev transition."
+      RESULT_PARSED=true
+      exit 1
+    fi
     log "Issue #${ISSUE_NUMBER} moved to pending-dev (E2E hard gate fail — no fan-out)."
     RESULT_PARSED=true
     exit 0

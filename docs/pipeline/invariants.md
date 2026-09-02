@@ -339,6 +339,45 @@ In environments without Layer 3 (server-side), Layers 1 and 2 must both be insta
 
 ---
 
+## INV-150: a pre-fan-out E2E failure may be classified only by an optional wrapper-owned private-lane sidecar, while INV-92's verdict trailer remains the single durable actionability authority
+
+**Interaction with INV-122 (#122):** explicit actionability becomes durable before fixed-point protection may suppress a first valid correction; actionable failures are breaker-preemptible only after current-HEAD INV-85 correction-consumed proof, while non-actionable failures remain INV-92-owned.
+
+The review wrapper exports a path inside its private E2E lane directory to both
+command and browser integrations. For a non-zero lane result, absence preserves
+the legacy `dev-actionable=true` behavior. A present sidecar is trusted only
+when it is a non-symlink regular file of at most 1 KiB containing exactly one
+newline-terminated `dev-actionable=true|false` line; every malformed or unsafe
+present object resolves to `false`. Producers should write a sibling temporary
+regular file and atomically rename it into place. No exit-code, log, report, or
+LLM inference participates.
+
+Before `reviewing -> pending-dev`, the wrapper must durably produce a strict
+current-issue/full-HEAD/self-authored `result=e2e-failed` disposition and then a
+`failed-substantive dev-actionable=<classification> head=<HEAD>` verdict. The
+disposition is deliberately neutral: it proves pre-fan-out review completion,
+while INV-92 alone owns durable actionability. Required-write failure cannot
+make pending-dev observable. Same-HEAD dispatcher routing therefore reaches the
+existing bounded correction authority for `true` and INV-92's operator/stall
+route for `false`; a new HEAD remains pending-review-owned.
+
+**Producer**: review wrapper and the configured E2E integration's optional
+atomic sidecar write.
+
+**Consumer**: `lib-review-e2e.sh` strict parser,
+`lib-review-disposition.sh`, and `handle_pending_dev_pr_exists`'s existing
+verdict-aware route.
+
+**Status**: **ENFORCED**.
+
+**Tests**: `tests/unit/test-e2e-failure-actionability.sh`,
+`tests/unit/test-review-disposition.sh`, and
+`tests/unit/test-dispatcher-review-disposition-routing.sh`.
+
+**Design**: [`docs/designs/pre-fanout-e2e-actionability.md`](../designs/pre-fanout-e2e-actionability.md).
+
+---
+
 ## INV-141: token budgets use strict accounting for post-run wrapper gates and pre-dispatch admission, with durable terminal routing
 
 _Triage (issue #236): [machine-checked: tests/unit/test-lib-token-budget.sh, tests/unit/test-token-budget-wiring.sh, tests/unit/test-token-budget-e2e.sh, tests/e2e/run-token-budget-gates-e2e.sh]_
@@ -7020,6 +7059,8 @@ _Triage (issue #236): [machine-checked: tests/unit/test-issue-filter.sh, tests/u
 ---
 
 ## INV-122: a same-HEAD repeated E2E-gate failure (an INV-46 `fail` verdict against an UNCHANGED `(head_sha, e2e_lane_rc)` fingerprint, ≥`GATE_FAIL_STALL_THRESHOLD` consecutive rounds) is detected and HALTED — the breaker transitions `reviewing → stalled` then posts ONE structured `reason=same-head-gate-failure` report, gated on an already-`stalled` skip (deliberately NOT the dispatcher-side `may_stall_now` live-PID pre-gate — see rationale below)
+
+**INV-150 reconciliation (#122):** threshold alone cannot preempt a first valid actionability handoff. For dev-actionable=true, INV-122 additionally requires machine-authored current-HEAD INV-85 no-progress-substantive-attempt evidence proving the bounded DEV correction was consumed. dev-actionable=false remains INV-150/INV-92-owned; uncertain or forged correction history cannot suppress a valid DEV opportunity. No breaker generation or history reset is added.
 
 _Triage (issue #236): [machine-checked: tests/unit/test-e2e-gate-circuit-breaker.sh]_
 
