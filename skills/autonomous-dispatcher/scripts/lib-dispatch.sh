@@ -801,6 +801,7 @@ count_dispatcher_crashes() {
 # copy-pasted `pid_alive` block ([INV-105] C4′/C9b).
 #
 # Scope of the extraction (C9b): the LIVENESS PREDICATE ONLY —
+#   - the mode-scoped fresh dispatch-marker probe,
 #   - the `pid_alive [--at-cap]` probe, AND
 #   - the local-backend empty-PID→DEAD narrowing (issue #263).
 # It emits NO comment. `mark_stalled` keeps its own idempotent
@@ -819,8 +820,15 @@ count_dispatcher_crashes() {
 # Returns 1 (DEFER) when a wrapper is ALIVE; returns 0 (ELIGIBLE) otherwise
 # (dead PID, absent PID file, or local empty-PID→DEAD).
 may_stall_now() {
-  local at_cap=false
-  if [ "${1:-}" = "--at-cap" ]; then at_cap=true; shift; fi
+  local at_cap=false dispatch_scope="any"
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --at-cap) at_cap=true ;;
+      --dev-dispatch-only) dispatch_scope="dev" ;;
+      *) return 1 ;;
+    esac
+    shift
+  done
   local issue_num="$1"
 
   # [INV-108] (#361 round-14 local review): a FRESH dispatch marker (any mode,
@@ -830,7 +838,7 @@ may_stall_now() {
   # just-started winner (observed shape: Branch B keys on a no-progress
   # attempt marker the concurrent winner posted right after ITS dispatch).
   # Defer; the marker expires via TTL, so this can never wedge stalling.
-  if _dispatch_marker_recent "$issue_num"; then
+  if _dispatch_marker_recent "$issue_num" "$dispatch_scope"; then
     return 1   # defer (a dispatch is in flight / cold-starting)
   fi
 
@@ -2766,7 +2774,7 @@ _dispatch_marker_ttl() {
   echo "$_ttl"
 }
 
-# _dispatch_marker_recent <issue_num> — rc 0 iff ANY mode's dispatch marker
+# _dispatch_marker_recent <issue_num> [scope] — rc 0 iff the selected mode scope's dispatch marker
 # for this issue is FRESH (age < TTL). Read-only probe (never acquires,
 # never mutates). Consumed by `may_stall_now` (#361 round-14 local review
 # NO-GO finding): a fresh marker means a wrapper was dispatched < TTL ago
@@ -2776,13 +2784,20 @@ _dispatch_marker_ttl() {
 # Fail toward NOT-recent (rc 1) on any infra failure: this probe only ever
 # DEFERS a stall; failing closed here would wedge stalling entirely.
 _dispatch_marker_recent() {
-  local issue_num="$1" base_dir mode m mtime age ttl
+  local issue_num="$1" scope="${2:-any}" base_dir mode m mtime age ttl
+  local -a modes
+  case "$scope" in
+    any) modes=(dev-new dev-resume review) ;;
+    dev) modes=(dev-new dev-resume) ;;
+    review) modes=(review) ;;
+    *) return 0 ;;
+  esac
   base_dir=$(pid_dir_for_project 2>/dev/null) || return 1
   [ -n "$base_dir" ] || return 1
   ttl=$(_dispatch_marker_ttl)
   local now
   now=$(date -u +%s)
-  for mode in dev-new dev-resume review; do
+  for mode in "${modes[@]}"; do
     m="${base_dir}/dispatch-marker-${issue_num}-${mode}"
     [ -e "$m" ] || continue
     mtime=$(_mtime_epoch "$m")
@@ -4652,7 +4667,7 @@ handle_pending_dev_pr_exists() {
     local _recovery_cause="crashed-session"
     local _same_head_operational_defer=0
     [ -z "$_sid" ] && _recovery_cause="self-heal"
-    if may_stall_now "$issue_num"; then
+    if may_stall_now --dev-dispatch-only "$issue_num"; then
       # The routing-evidence comparison above and may_stall_now can span enough
       # time for a force-push. Re-pin the PR before acting so the no-session and
       # unconfirmed-session recovery paths have the same stale-HEAD protection

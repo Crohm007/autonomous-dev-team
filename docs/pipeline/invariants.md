@@ -10084,3 +10084,14 @@ retry-limit comments do not reset the watchdog's non-idempotent count.
 - [`docs/designs/issue-545-same-head-mergeability-freshness.md`](../designs/issue-545-same-head-mergeability-freshness.md) — decision record and failure-mode diagram.
 
 ---
+
+
+---
+
+## INV-151: durable review→pending-dev handoff scopes liveness to DEV dispatches
+
+Once review has durably written current-HEAD routing evidence and transitioned an Issue to `pending-dev`, the fresh `review` dispatch marker is historical for DEV recovery and must not by itself defer the bounded same-HEAD correction. The shared liveness predicate therefore supports an explicit DEV-only marker scope at that recovery call site. Fresh `dev-new`/`dev-resume` markers and authoritative DEV PID/heartbeat evidence still defer; ordinary terminal-stall callers retain the default any-mode scope. No lifecycle state, retry counter, or second liveness authority is introduced.
+
+**Tests**: `test-controller-dispatch-dedup-361.sh` TC-DEDUP-361-040 and `test-dispatcher-review-disposition-routing.sh` TC-E2E-ACT-009.
+
+**Status**: **ENFORCED**.

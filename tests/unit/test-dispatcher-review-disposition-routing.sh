@@ -72,6 +72,7 @@ ATTEMPT_PRESENT=0
 LEGACY_LAST_HEAD=""
 STRICT_READ_FAIL=0
 CAPTURE_POSTS=0
+FRESH_REVIEW_MARKER=0
 
 _append_comment() {
   local body="$1" kind="${2:-self}"
@@ -108,6 +109,7 @@ _reset() {
   LEGACY_LAST_HEAD=""
   STRICT_READ_FAIL=0
   CAPTURE_POSTS=0
+  FRESH_REVIEW_MARKER=0
 }
 
 fetch_pr_for_issue() {
@@ -173,7 +175,10 @@ classify_recent_review_verdict() {
 count_review_aware_flips() { printf '%s' "$FLIP_COUNT"; }
 dev_report_bot_unfixable() { return 1; }
 count_frozen_convergence_rounds() { printf '0'; }
-may_stall_now() { return 0; }
+may_stall_now() {
+  if [[ "$FRESH_REVIEW_MARKER" == "1" && " $* " != *" --dev-dispatch-only "* ]]; then return 1; fi
+  return 0
+}
 acquire_dispatch_marker() { return 0; }
 release_dispatch_marker() { TRACE+="release:$1:$2"$'\n'; }
 dispatch_marker_confirm_launched() { TRACE+="confirm:$1:$2"$'\n'; }
@@ -217,6 +222,17 @@ assert_contains "TC-E2E-ACT-004 actionable E2E reaches bounded correction" \
   "dispatch:dev-new:540" "$TRACE"
 assert_not_contains "TC-E2E-ACT-004 actionable E2E avoids pending-review bounce" \
   "transition:pending-dev>pending-review" "$TRACE"
+
+_reset
+_set_disposition "$HEAD_A" "e2e-failed"
+DEV_ACTIONABLE="true"
+SESSION_COMPLETED=0
+FRESH_REVIEW_MARKER=1
+handle_pending_dev_pr_exists 540
+assert_contains "TC-E2E-ACT-009 real sequence ignores fresh review marker and reaches bounded DEV correction" \
+  "dispatch:dev-new:540" "$TRACE"
+assert_not_contains "TC-E2E-ACT-009 real sequence does not fall through to stale-verdict" \
+  "stale-verdict:${HEAD_A}" "$TRACE"
 
 _reset
 _set_disposition "$HEAD_A" "mergeable-unknown"

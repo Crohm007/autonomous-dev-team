@@ -967,6 +967,19 @@ touch -t 200001010000.00 "$TMPDIR/dispatch-marker-820-dev-new"
 assert_true "TC-DEDUP-361-039b expired marker does not defer — stall eligible again (rc 0)" $?
 rm -rf "$TMPDIR/dispatch-marker-820-dev-new"
 
+# TC-DEDUP-361-040 / INV-151: review handoff markers remain terminal-stall
+# protection but are not competing DEV dispatches for pending-dev recovery.
+rm -rf "$TMPDIR/dispatch-marker-821-review" "$TMPDIR/dispatch-marker-821-dev-new"
+mkdir "$TMPDIR/dispatch-marker-821-review"
+( pid_alive() { return 1; }; get_pid() { echo ""; }; may_stall_now 821 2>/dev/null )
+assert_false "TC-DEDUP-361-040 default liveness defers on fresh review marker" $?
+( pid_alive() { return 1; }; get_pid() { echo ""; }; may_stall_now --dev-dispatch-only 821 2>/dev/null )
+assert_true "TC-DEDUP-361-040 DEV recovery ignores fresh review marker" $?
+mkdir "$TMPDIR/dispatch-marker-821-dev-new"
+( pid_alive() { return 1; }; get_pid() { echo ""; }; may_stall_now --dev-dispatch-only 821 2>/dev/null )
+assert_false "TC-DEDUP-361-040 DEV recovery still defers on fresh DEV marker" $?
+rm -rf "$TMPDIR/dispatch-marker-821-review" "$TMPDIR/dispatch-marker-821-dev-new"
+
 # TC-DEDUP-361-032: source-of-truth — dispatcher-tick.sh installs the
 # EXIT-trap handler (the backstop for any bare-command set -e abort between
 # acquire and confirm that an explicit release call cannot reach).
