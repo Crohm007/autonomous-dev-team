@@ -41,7 +41,12 @@ same-HEAD circuit breaker, plus a source-of-truth grep pin that
 | TC-CIRCUIT-013 | Same-head, DIFFERENT rc between rounds → does NOT trip on round 2 (counter reset, not accumulated) | breaker does not fire |
 | TC-CIRCUIT-014 | New commit pushed after N-1 failures → breaker does not trip; marker under the new SHA starts at count=1 | breaker does not fire, fresh marker |
 | TC-CIRCUIT-015 | Regression: genuine review findings with CHANGING head (normal FAIL path, no E2E gate involvement) → breaker logic never invoked, no behavior change | N/A — the breaker's own trip function is not on this path |
-| TC-CIRCUIT-016 | Operator removes `stalled` without a new commit → next round re-reads the still-armed marker at count>=threshold-1 and re-trips on the very next failure (documented, intentional) | breaker fires again |
+| TC-CIRCUIT-016 | Pure counter after stalled is removed without a new commit | same-HEAD/rc counter remains armed and reaches threshold; full wrapper trip still requires TC-CIRCUIT-016a..016e eligibility |
+| TC-CIRCUIT-016a | Actionable trip requires consumed-correction evidence | INV-85 gate wired |
+| TC-CIRCUIT-016b | Historical breaker without INV-85 marker | correction unconsumed |
+| TC-CIRCUIT-016c | Machine current-HEAD INV-85 marker | correction consumed |
+| TC-CIRCUIT-016d | Human-forged current-HEAD marker | ignored |
+| TC-CIRCUIT-016e | Machine other-HEAD marker | ignored |
 
 ### Group C — already-stalled skip + report content (TC-CIRCUIT-017..020)
 

@@ -189,11 +189,30 @@ assert_eq "TC-CIRCUIT-015 changing head on the normal FAIL path never trips the 
   "$(trip_decision "$unrelated_marker" brandnewhead 1 2)"
 
 # TC-CIRCUIT-016: operator removes `stalled` without a new commit — the
-# marker is still armed at (or past) threshold-1; the next round's failure
-# (same head, same rc) re-trips immediately. Documented, intentional.
+# marker is still armed at threshold-1, so the pure counter reaches the trip threshold on the next same-head/same-rc failure. Full wrapper trip eligibility is additionally constrained by TC-CIRCUIT-016a..016e.
 stored16=$(_gate_breaker_marker 100 deadbeef 1 1)
-assert_eq "TC-CIRCUIT-016 re-arm without new commit re-trips on next failure" "trip" \
+assert_eq "TC-CIRCUIT-016 pure counter remains armed without a new commit" "trip" \
   "$(trip_decision "$stored16" deadbeef 1 2)"
+
+# TC-CIRCUIT-016a..016e (#122): a historical breaker count cannot preempt the
+# first valid INV-150/INV-92 handoff. Breaker trip eligibility depends on
+# authoritative machine-authored INV-85 evidence that a substantive DEV
+# correction was actually dispatched for this exact full HEAD.
+head16="0123456789abcdef0123456789abcdef01234567"
+other16="fedcba9876543210fedcba9876543210fedcba98"
+machine16=$(jq -cn --arg body "<!-- no-progress-substantive-attempt:${head16} attempt=1 -->" '[{authorKind:"bot",body:$body}]')
+human16=$(jq -cn --arg body "<!-- no-progress-substantive-attempt:${head16} attempt=1 -->" '[{authorKind:"human",body:$body}]')
+other_head16=$(jq -cn --arg body "<!-- no-progress-substantive-attempt:${other16} attempt=1 -->" '[{authorKind:"bot",body:$body}]')
+assert_contains "TC-CIRCUIT-016a wrapper gates breaker trip on consumed DEV correction evidence" \
+  "$(cat "$WRAPPER")" '[[ "$_gf_correction_consumed" == "true" ]]'
+assert_eq "TC-CIRCUIT-016b historical breaker without correction proof stays unconsumed" "false" \
+  "$(_gate_breaker_correction_consumed '[]' "$head16")"
+assert_eq "TC-CIRCUIT-016c machine current-HEAD INV-85 marker proves correction consumed" "true" \
+  "$(_gate_breaker_correction_consumed "$machine16" "$head16")"
+assert_eq "TC-CIRCUIT-016d human-forged INV-85 marker is ignored" "false" \
+  "$(_gate_breaker_correction_consumed "$human16" "$head16")"
+assert_eq "TC-CIRCUIT-016e other-HEAD INV-85 marker is ignored" "false" \
+  "$(_gate_breaker_correction_consumed "$other_head16" "$head16")"
 
 # ===========================================================================
 echo

@@ -256,6 +256,37 @@ _gate_breaker_threshold() {
   printf '%s\n' "$val"
 }
 
+# _gate_breaker_correction_consumed <normalized-comments-json> <head>
+#
+# Echo true only when a machine-authored INV-85 marker proves that a fresh
+# substantive DEV correction was actually dispatched for this exact HEAD.
+# Reuse the existing durable authority instead of adding breaker generations.
+# Malformed/unreadable input biases to false so uncertain history cannot
+# suppress a valid DEV correction handoff.
+_gate_breaker_correction_consumed() {
+  local comments="${1:-[]}" head="${2:-}" prefix
+  if ! [[ "$head" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    printf 'false\n'
+    return 0
+  fi
+  head="${head,,}"
+  prefix="<!-- no-progress-substantive-attempt:${head} "
+  local result
+  result=$(jq -r --arg prefix "$prefix" '
+    if type != "array" then false
+    else any(.[];
+      type == "object"
+      and .authorKind != "human"
+      and (.body | type) == "string"
+      and (.body | startswith($prefix))
+    )
+    end
+  ' <<<"$comments" 2>/dev/null) || result="false"
+  [[ "$result" == "true" ]] || result="false"
+  printf '%s\n' "$result"
+}
+
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # _validate_ac_coverage_json — read a candidate JSON on stdin, echo the
 # canonical compact form (jq -c) iff it is a non-empty flat object whose every

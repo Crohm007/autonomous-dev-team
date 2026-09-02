@@ -2208,12 +2208,27 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
     # repo collaborator able to comment on the issue could pre-seed a forged
     # marker at a high count and force the NEXT genuine failure to trip the
     # breaker prematurely.
-    _gf_prior_marker=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null \
-      | jq -r '[.[] | select(.authorKind != "human") | select(.body | contains("dispatcher-gate-fail-breaker:"))] | sort_by(.createdAt) | last | .body // ""' \
-      2>/dev/null || echo "")
+    # Read once for breaker history and the existing INV-85 proof that a
+    # substantive DEV correction was actually dispatched for this exact HEAD.
+    # A failed read becomes [] and therefore cannot cause a premature stall;
+    # downstream required routing writes remain fail-closed.
+    _gf_comments=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null || echo "[]")
+    _gf_prior_marker=$(jq -r \
+      '[.[] | select(.authorKind != "human") | select(.body | contains("dispatcher-gate-fail-breaker:"))] | sort_by(.createdAt) | last | .body // ""' \
+      2>/dev/null <<<"$_gf_comments" || echo "")
+    _gf_correction_consumed=$(_gate_breaker_correction_consumed \
+      "$_gf_comments" "$PR_HEAD_SHA")
     _gf_next_count=$(_gate_breaker_next_count "$_gf_prior_marker" "$PR_HEAD_SHA" "$_e2e_lane_rc")
     _gf_threshold=$(_gate_breaker_threshold)
     _gf_marker=$(_gate_breaker_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$_e2e_lane_rc" "$_gf_next_count")
+    # INV-150/INV-92 owns actionability. The breaker may preempt only a
+    # dev-actionable failure after the same-HEAD correction opportunity was
+    # actually consumed. dev-actionable=false flows through the required
+    # disposition/verdict route so INV-92 stays the sole no-DEV stall owner.
+    _gf_trip_eligible="false"
+    if [[ "$_e2e_dev_actionable" == "true" ]] && [[ "$_gf_correction_consumed" == "true" ]]; then
+      _gf_trip_eligible="true"
+    fi
     # [#453 codex review round-2, P1] NO may_stall_now / lib-dispatch.sh
     # liveness pre-gate here (unlike INV-105's dispatcher-side call). That
     # predicate's dispatch-marker-freshness check exists so the DISPATCHER
@@ -2236,7 +2251,8 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
     # empty on a chp_pr_view failure. An empty head is not "the same head" —
     # it's "we don't know the head" — so a fingerprint keyed on it must never
     # satisfy the same-HEAD safety condition this breaker exists to enforce.
-    if [[ "$_gf_already_stalled" != "true" ]] && [[ -n "$PR_HEAD_SHA" ]] && [[ "$_gf_next_count" -ge "$_gf_threshold" ]]; then
+    if [[ "$_gf_already_stalled" != "true" ]] && [[ -n "$PR_HEAD_SHA" ]] && [[ "$_gf_next_count" -ge "$_gf_threshold" ]] \
+       && [[ "$_gf_trip_eligible" == "true" ]]; then
       log "[#453] same-HEAD gate-fail breaker TRIPPED: head=${PR_HEAD_SHA} rc=${_e2e_lane_rc} count=${_gf_next_count} (threshold=${_gf_threshold}) — halting re-dispatch, transitioning to stalled."
       # Transition FIRST, atomically — mirrors INV-105's TOCTOU fix (a
       # failed transition aborts under set -euo pipefail BEFORE RESULT_PARSED

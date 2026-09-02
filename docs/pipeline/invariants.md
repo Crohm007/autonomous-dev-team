@@ -341,6 +341,8 @@ In environments without Layer 3 (server-side), Layers 1 and 2 must both be insta
 
 ## INV-150: a pre-fan-out E2E failure may be classified only by an optional wrapper-owned private-lane sidecar, while INV-92's verdict trailer remains the single durable actionability authority
 
+**Interaction with INV-122 (#122):** explicit actionability becomes durable before fixed-point protection may suppress a first valid correction; actionable failures are breaker-preemptible only after current-HEAD INV-85 correction-consumed proof, while non-actionable failures remain INV-92-owned.
+
 The review wrapper exports a path inside its private E2E lane directory to both
 command and browser integrations. For a non-zero lane result, absence preserves
 the legacy `dev-actionable=true` behavior. A present sidecar is trusted only
@@ -7057,6 +7059,8 @@ _Triage (issue #236): [machine-checked: tests/unit/test-issue-filter.sh, tests/u
 ---
 
 ## INV-122: a same-HEAD repeated E2E-gate failure (an INV-46 `fail` verdict against an UNCHANGED `(head_sha, e2e_lane_rc)` fingerprint, ≥`GATE_FAIL_STALL_THRESHOLD` consecutive rounds) is detected and HALTED — the breaker transitions `reviewing → stalled` then posts ONE structured `reason=same-head-gate-failure` report, gated on an already-`stalled` skip (deliberately NOT the dispatcher-side `may_stall_now` live-PID pre-gate — see rationale below)
+
+**INV-150 reconciliation (#122):** threshold alone cannot preempt a first valid actionability handoff. For dev-actionable=true, INV-122 additionally requires machine-authored current-HEAD INV-85 no-progress-substantive-attempt evidence proving the bounded DEV correction was consumed. dev-actionable=false remains INV-150/INV-92-owned; uncertain or forged correction history cannot suppress a valid DEV opportunity. No breaker generation or history reset is added.
 
 _Triage (issue #236): [machine-checked: tests/unit/test-e2e-gate-circuit-breaker.sh]_
 
