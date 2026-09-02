@@ -204,6 +204,61 @@ assert_contains "TC-CPC-006 flips to pending-dev" \
 assert_not_contains "TC-CPC-006 never routes to pending-review" \
   "--add-label pending-review" "$CPC006_GH_LOG"
 
+# ===========================================================================
+# TC-CPC-007: successful DEV emits a trusted handoff marker only when the
+# authoritative post-run PR HEAD differs from the pre-run HEAD.
+# ===========================================================================
+echo ""
+echo "=== TC-CPC-007: authoritative PR HEAD advancement proof ==="
+echo ""
+
+assert_contains "handoff proof marker is versioned" 'dev-pr-handoff-v1:' "$CONTENT"
+assert_contains "handoff proof resolves authoritative post-run PR" 'resolve_pr_for_issue' "$CONTENT"
+assert_contains "handoff proof binds pre-run HEAD" 'pre=${_dev_handoff_pre}' "$CONTENT"
+assert_contains "handoff proof binds post-run HEAD" 'post=${_dev_handoff_head}' "$CONTENT"
+assert_contains "handoff proof requires a changed HEAD" '"$_dev_handoff_head" != "${DEV_PR_HEAD_SHA:-}"' "$CONTENT"
+
+# ===========================================================================
+# TC-CPC-008: execute real cleanup() with an existing PR whose authoritative
+# HEAD advanced; marker must bind issue/PR/session/run/pre/post before routing.
+# ===========================================================================
+echo ""
+echo "=== TC-CPC-008: cleanup emits changed-HEAD handoff proof ==="
+echo ""
+
+: > "$GH_RECORD"
+env -u ADT_GUARD_FD -u ADT_LANE_DIR -u ADT_LANE_ID -u ADT_STATE_ROOT \
+    -u AGENT_PROGRESS_FILE -u AGENT_PROGRESS_RUNID_FILE \
+    -u AGENT_PID_FILE -u AGENT_PR_CREATE_FILE -u AGENT_BOT_TRIGGER_FILE \
+PATH="/usr/bin:/bin" GH_RECORD="$GH_RECORD" AGENT_RAN="true" \
+ISSUE_NUMBER="77" REPO="acme/widget" PID_FILE="/dev/null" \
+SESSION_ID="session-77" RUN_ID="run-77" LOG_FILE="/tmp/test-cpc.log" \
+GH_AUTH_MODE="token" RECEIVED_SIGTERM="0" MODE="new" AGENT_CMD="claude" \
+AGENT_DEV_MODEL="sonnet" DEV_PR_HEAD_SHA="1111111111111111111111111111111111111111" PR_NUM="12" \
+bash -c "
+  set +e
+  log() { :; }
+  cleanup_github_auth() { :; }
+  itp_post_comment() { printf '%s\\n' \"\$2\" >> \"\$GH_RECORD\"; }
+  itp_transition_state() { :; }
+  terminal_intent_cleanup_transition() { :; }
+  TURN_DEV_ACCOUNTING_FAILED=false; TURN_DEV_ROUTE_FAILED=false; TURN_DEV_WINNER=\"\"; TURN_DEV_RECOVERY_STAGED=false; TURN_DEV_LAUNCH_REFUSED=false
+  _token_dev_evaluate_cleanup() { return 0; }
+  _resource_dev_evaluate_budget_if_applicable() { return 10; }
+  drain_agent_pr_create() { return 0; }
+  drain_agent_bot_triggers() { return 0; }
+  rearm_gh_resolution() { :; }
+  chp_pr_list() { echo '[{\"body\":\"fixes #77\"}]'; }
+  resolve_pr_for_issue() { echo '{\"number\":12,\"headRefOid\":\"2222222222222222222222222222222222222222\"}'; }
+  _review_normalize_full_head() { printf '%s\\n' \"\$1\"; }
+  $TURN_CLEANUP_FN
+  $CLEANUP_FN
+  (exit 0); cleanup
+" 2>"$TMPROOT_CPC/tc008-stderr.log"
+CPC008_LOG=$(cat "$GH_RECORD")
+assert_contains "TC-CPC-008 marker binds authoritative changed HEAD" \
+  '<!-- dev-pr-handoff-v1: issue=77 pr=12 session=session-77 run=run-77 pre=1111111111111111111111111111111111111111 post=2222222222222222222222222222222222222222 -->' "$CPC008_LOG"
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

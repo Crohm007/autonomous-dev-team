@@ -1509,6 +1509,34 @@ EOF
   _token_budget_eval_rc=0
   _resource_dev_evaluate_budget_if_applicable || _token_budget_eval_rc=$?
 
+  # [INV-151] Persist a trusted DEV handoff proof before a hard budget intent can
+  # terminalize the normal pending-review transition. The proof is emitted only
+  # from authoritative provider state when this successful invocation created a
+  # PR or advanced the exact PR that was resolved before launch. Recovery can
+  # therefore distinguish durable DEV progress from exit-code success alone.
+  if [[ "$_token_budget_eval_rc" -eq 10 && $exit_code -eq 0 && "${PR_EXISTS:-0}" -gt 0 \
+      && -n "${SESSION_ID:-}" && -n "${RUN_ID:-}" ]]; then
+    _dev_handoff_info=""
+    if _dev_handoff_info=$(_teardown_call resolve_pr_for_issue \
+        "$ISSUE_NUMBER" "number,headRefOid" 2>/dev/null) \
+        && jq -e 'type == "object" and (.number | type == "number") and (.headRefOid | type == "string")' \
+          >/dev/null 2>&1 <<<"$_dev_handoff_info"; then
+      _dev_handoff_pr=$(jq -r '.number' <<<"$_dev_handoff_info")
+      _dev_handoff_head=$(jq -r '.headRefOid' <<<"$_dev_handoff_info")
+      _dev_handoff_head="$(_review_normalize_full_head "$_dev_handoff_head")" || _dev_handoff_head=""
+      _dev_handoff_pre="${DEV_PR_HEAD_SHA:-none}"
+      if [[ -n "$_dev_handoff_head" \
+          && "$_dev_handoff_head" != "${DEV_PR_HEAD_SHA:-}" \
+          && ( -z "${PR_NUM:-}" || "$_dev_handoff_pr" == "$PR_NUM" ) ]]; then
+        _dev_handoff_marker="<!-- dev-pr-handoff-v1: issue=${ISSUE_NUMBER} pr=${_dev_handoff_pr} session=${SESSION_ID} run=${RUN_ID} pre=${_dev_handoff_pre} post=${_dev_handoff_head} -->"
+        _teardown_call itp_post_comment "$ISSUE_NUMBER" \
+          "${_dev_handoff_marker}\nADT-DEV-HANDOFF: authoritative PR HEAD advanced during this DEV invocation." \
+          2>/dev/null || log "WARNING: Failed to persist DEV PR handoff proof"
+      fi
+    fi
+    unset _dev_handoff_info _dev_handoff_pr _dev_handoff_head _dev_handoff_pre _dev_handoff_marker
+  fi
+
   # A hard accounting_start failure refuses the launch and deliberately leaves
   # label ownership unchanged. Dispatcher liveness reconciliation retries after
   # the store/configuration problem is repaired.
