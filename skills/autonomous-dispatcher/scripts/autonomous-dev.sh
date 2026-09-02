@@ -1516,6 +1516,7 @@ EOF
         || _dev_handoff_post_head=""
       if [[ -n "$_dev_handoff_post_head" \
             && "$_dev_handoff_post_head" != "$DEV_PR_HEAD_SHA" ]]; then
+        rearm_gh_resolution
         _teardown_call itp_post_comment "$ISSUE_NUMBER" \
           "<!-- dev-pr-handoff-v1: issue=${ISSUE_NUMBER} pr=${PR_NUM} session=${SESSION_ID} run=${RUN_ID:-unknown} pre-head=${DEV_PR_HEAD_SHA} post-head=${_dev_handoff_post_head} -->" \
           2>/dev/null || log "WARNING: Failed to persist DEV PR-head handoff evidence"
