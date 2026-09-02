@@ -123,7 +123,9 @@ _e2e_failure_actionability() {
     || { exec {fd}<&-; printf 'false\n'; return 0; }
   # `read` may return non-zero only for the intentionally rejected missing-EOL
   # shape; retain its captured bytes so the exact-size check below fails closed.
-  IFS= read -r value <&$fd || true
+  if ! IFS= read -r value <&$fd; then
+    : # Missing EOL is intentionally rejected by the exact-size check below.
+  fi
   if IFS= read -r -n 1 extra <&$fd; then
     exec {fd}<&-
     printf 'false\n'
@@ -277,7 +279,7 @@ _gate_breaker_correction_consumed() {
     else any(.[];
       type == "object"
       and .authorKind != "human"
-      and (.body | type) == "string"
+      and (.body | type == "string")
       and (.body | startswith($prefix))
     )
     end
