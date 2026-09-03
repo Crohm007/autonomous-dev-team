@@ -2936,7 +2936,11 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   # path is deterministic from the session id — no sidecar needed (the codex
   # subshell writes to it directly). Empty for a non-codex agent.
   _agent_codex_stdout=""
-  [[ "$_agent" == "codex" ]] && _agent_codex_stdout="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-codex-stdout-${_agent_session_id}.txt"
+  _agent_codex_usage=""
+  if [[ "$_agent" == "codex" ]]; then
+    _agent_codex_stdout="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-codex-stdout-${_agent_session_id}.txt"
+    _agent_codex_usage="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-codex-usage-${_agent_session_id}.jsonl"
+  fi
   AGENT_CODEX_LOGS+=("$_agent_codex_stdout")
   # INV-61 (#215): for a `kiro` member, record its generic per-agent log path so
   # the post-resolution drop-reason scrape can read the browser/device-flow
@@ -2950,8 +2954,8 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   # For codex the token line is in its CLEAN stdout capture (AGENT_CODEX_LOGS),
   # not the noisy generic log, so prefer that; every other CLI writes its usage
   # block to $_agent_log.
-  if [[ "$_agent" == "codex" && -n "$_agent_codex_stdout" ]]; then
-    AGENT_GENERIC_LOGS+=("$_agent_codex_stdout")
+  if [[ "$_agent" == "codex" && -n "$_agent_codex_usage" ]]; then
+    AGENT_GENERIC_LOGS+=("$_agent_codex_usage")
   else
     AGENT_GENERIC_LOGS+=("$_agent_log")
   fi
@@ -3151,7 +3155,7 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
         # invocation; it only matters for a re-run iteration that fires after
         # this agent's own controller has outlived the observe loop's INV-84
         # early exit.
-        _run_codex_review "$_agent_prompt" "${_agent_model:-sonnet}" "$_agent_codex_stdout" "$_cx_pr_workdir" "$_FANOUT_DIR" \
+        _run_codex_review "$_agent_prompt" "${_agent_model:-sonnet}" "$_agent_codex_stdout" "$_cx_pr_workdir" "$_FANOUT_DIR" "$_agent_codex_usage" \
           >>"$_agent_log" 2>&1 || _rc=$?
         _codex_review_cleanup_worktree "$_cx_pr_workdir"
       else
