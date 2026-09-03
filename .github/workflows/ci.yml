@@ -32,7 +32,7 @@ on:
     # gates the live-smoke job (github.event.label.name).
     types: [opened, synchronize, reopened, labeled]
   push:
-    branches: [main]
+    branches: [main, ci/146-hermetic-validation]
 
 jobs:
   hermetic-unit:
