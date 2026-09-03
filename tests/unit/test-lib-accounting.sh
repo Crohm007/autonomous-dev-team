@@ -561,7 +561,7 @@ assert_eq "TC-RESOURCEACCOUNT-038 projection source ids rebuilt" "2" \
 
 # ---------------------------------------------------------------------------
 # Acknowledged historical unknown admission — TC-RESOURCEACCOUNT-081..086
-source "$SCRIPT_DIR/test-accounting-ack-admission.inc.sh"
+source "$SCRIPT_DIR/accounting-ack-admission.inc.sh"
 
 # Reconciliation (D6) — TC-RESOURCEACCOUNT-040..045
 # ---------------------------------------------------------------------------
