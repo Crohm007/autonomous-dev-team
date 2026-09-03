@@ -281,19 +281,46 @@ metrics_parse_tokens() {
 
   local input="" output="" total=""
 
-  # claude JSON: scan each line for a parseable object with a .usage block.
-  # The log may interleave non-JSON; `-R` + try/catch tolerates that.
-  local usage
-  usage="$(jq -R -r '
-        (try fromjson catch null) as $o
-        | select($o != null and ($o.usage != null))
-        | "\($o.usage.input_tokens // "")\t\($o.usage.output_tokens // "")"
-      ' "$scan" 2>/dev/null | tail -1)"
-  if [[ -n "$usage" ]]; then
-    input="${usage%%$'\t'*}"
-    output="${usage##*$'\t'}"
-    if [[ "$input" =~ ^[0-9]+$ && "$output" =~ ^[0-9]+$ ]]; then
-      total=$((input + output))
+  # Codex REVIEW JSONL emits one terminal `turn.completed` usage object per
+  # actual invocation. Internal REVIEW reruns belong to one accounting invocation,
+  # so aggregate every valid terminal record in the current scan window. If a
+  # terminal record exists but any usage field is missing/non-numeric, emit no
+  # usage at all: strict accounting remains fail-closed rather than under-counting.
+  local codex_terminal_count codex_usage
+  codex_terminal_count="$(jq -R -r '(try fromjson catch null) as $o | select($o != null and $o.type == "turn.completed") | 1' "$scan" 2>/dev/null | wc -l | tr -d '[:space:]')"
+  if [[ "$codex_terminal_count" =~ ^[1-9][0-9]*$ ]]; then
+    codex_usage="$(jq -R -s -r '
+        split("\n")
+        | map(try fromjson catch null)
+        | map(select(. != null and .type == "turn.completed")) as $turns
+        | if ($turns | length) == 0 then empty
+          elif all($turns[]; (.usage.input_tokens | type) == "number" and (.usage.output_tokens | type) == "number" and .usage.input_tokens >= 0 and .usage.output_tokens >= 0)
+          then [($turns | map(.usage.input_tokens) | add), ($turns | map(.usage.output_tokens) | add)] | @tsv
+          else empty
+          end
+      ' "$scan" 2>/dev/null)"
+    if [[ -n "$codex_usage" ]]; then
+      input="${codex_usage%%$'\t'*}"
+      output="${codex_usage##*$'\t'}"
+      if [[ "$input" =~ ^[0-9]+$ && "$output" =~ ^[0-9]+$ ]]; then
+        total=$((input + output))
+      fi
+    fi
+  else
+    # Non-Codex compatibility: preserve the existing last-usage-object behavior
+    # for Claude/other structured logs.
+    local usage
+    usage="$(jq -R -r '
+          (try fromjson catch null) as $o
+          | select($o != null and ($o.usage != null))
+          | "\($o.usage.input_tokens // "")\t\($o.usage.output_tokens // "")"
+        ' "$scan" 2>/dev/null | tail -1)"
+    if [[ -n "$usage" ]]; then
+      input="${usage%%$'\t'*}"
+      output="${usage##*$'\t'}"
+      if [[ "$input" =~ ^[0-9]+$ && "$output" =~ ^[0-9]+$ ]]; then
+        total=$((input + output))
+      fi
     fi
   fi
 

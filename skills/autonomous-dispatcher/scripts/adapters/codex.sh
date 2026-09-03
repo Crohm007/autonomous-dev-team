@@ -921,7 +921,7 @@ ${text}"
 #   intended path), NO `-m`, NO `--json`.
 _codex_review_argv() {
   local -n _cra_out="$1"
-  local prompt="${2:-}" model="${3:-}"
+  local prompt="${2:-}" model="${3:-}" human_output_file="${4:-}"
   local -a extra_args=()
   # Tokenize operator extra-args the same way the agent primitives do. Prefer the
   # shared helper when available (lib-agent.sh::_parse_extra_args), else a plain
@@ -932,7 +932,11 @@ _codex_review_argv() {
     # shellcheck disable=SC2206
     [[ -n "${AGENT_DEV_EXTRA_ARGS:-}" ]] && extra_args=(${AGENT_DEV_EXTRA_ARGS})
   fi
-  _cra_out=(review "$prompt")
+  if [[ -n "$human_output_file" ]]; then
+    _cra_out=(review --json --output-last-message "$human_output_file" "$prompt")
+  else
+    _cra_out=(review "$prompt")
+  fi
   [[ -n "$model" ]] && _cra_out+=(-c "model=\"${model}\"")
   # Append each extra-arg as its own element (no word-splitting — already
   # tokenized). An empty array appends nothing (bash 4.4+, the box's 5.x shell),
@@ -1084,7 +1088,7 @@ _codex_review_cleanup_worktree() {
 # written to <stdout-file> so the wrapper's stdout→verdict fallback and the
 # stream-error drop-reason scan read codex's actual review text.
 _run_codex_review() {
-  local prompt="$1" model="$2" stdout_file="$3" pr_workdir="${4:-}" fanout_liveness_dir="${5:-}"
+  local prompt="$1" model="$2" stdout_file="$3" pr_workdir="${4:-}" fanout_liveness_dir="${5:-}" usage_file="${6:-}"
   local max="${CODEX_REVIEW_MAX_RERUNS:-3}"
 
   # [INV-72] Preflight the codex review binary BEFORE launching it. The codex
@@ -1125,7 +1129,12 @@ _run_codex_review() {
   # Populate a real array via the nameref builder — NO newline serialize/parse
   # round-trip, so a multi-line prompt stays ONE argv element (#218 finding 1).
   local -a _argv=()
-  _codex_review_argv _argv "$prompt" "$model"
+  if [[ -n "$usage_file" ]]; then
+    _codex_review_argv _argv "$prompt" "$model" "$stdout_file"
+    : > "$usage_file" 2>/dev/null || return 1
+  else
+    _codex_review_argv _argv "$prompt" "$model"
+  fi
 
   # _one_codex_review_run — a single `codex review` invocation under the shared
   # timeout. Writes codex's clean stdout to $stdout_file (overwrite, not append —
@@ -1146,7 +1155,13 @@ _run_codex_review() {
     # never leaks to the wrapper's cwd) when one was prepared; else from cwd
     # (degraded path, already warned above). The stdout-capture path is absolute
     # (the wrapper builds it under /tmp), so the cd does not misplace it.
-    if [[ "$_cwd_ok" == true ]]; then
+    if [[ -n "$usage_file" ]]; then
+      if [[ "$_cwd_ok" == true ]]; then
+        ( cd "$pr_workdir" && _run_with_timeout "$AGENT_CMD" "${_argv[@]}" ) >> "$usage_file" 2>> "$stdout_file"
+      else
+        _run_with_timeout "$AGENT_CMD" "${_argv[@]}" >> "$usage_file" 2>> "$stdout_file"
+      fi
+    elif [[ "$_cwd_ok" == true ]]; then
       ( cd "$pr_workdir" && _run_with_timeout "$AGENT_CMD" "${_argv[@]}" ) > "$stdout_file" 2>&1
     else
       _run_with_timeout "$AGENT_CMD" "${_argv[@]}" > "$stdout_file" 2>&1
