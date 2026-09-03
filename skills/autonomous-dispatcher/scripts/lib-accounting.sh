@@ -943,7 +943,7 @@ accounting_ack_unknown() {
 #
 # Locked full scan of <issue>/*.json (excluding projection.json). Echoes one
 # JSON object: {status, total_tokens, source_digest, open_invocations,
-# unknown_invocations}. `status` priority: unavailable (lock/store failure,
+# unknown_invocations, acknowledged_unknown_invocations}. `status` priority: unavailable (lock/store failure,
 # returned WITHOUT a scan) > corrupt (a malformed record was found) >
 # usage-unknown (>=1 sticky unknown) > incomplete (>=1 open, none unknown) >
 # complete. corrupt/usage-unknown/incomplete/complete are all successful
@@ -985,7 +985,31 @@ accounting_admission_query() {
   fi
 
   local total=0 any_corrupt=0 open_count=0 unknown_count=0
-  local open_json="[]" unknown_json="[]" scan_json="[]"
+  local open_json="[]" unknown_json="[]" all_unknown_json="[]" acknowledged_unknown_json="[]" scan_json="[]"
+  local acks_file="${dir}/acks.jsonl" acknowledged_ids="[]" acks_raw=""
+  if [[ -e "$acks_file" || -L "$acks_file" ]]; then
+    if _accounting_path_is_nonregular "$acks_file"; then
+      any_corrupt=1
+    elif ! acks_raw="$(cat "$acks_file" 2>/dev/null)"; then
+      echo "accounting_admission_query: cannot read acknowledgements for issue ${issue}" >&2
+      _accounting_unlock _lock_fd
+      _accounting_unavailable_json
+      return 1
+    elif ! acknowledged_ids="$(jq -Rsc --argjson sv "$ACCOUNTING_SCHEMA_VERSION" --argjson issue "$issue" '
+        split("\n") | map(select(length > 0) | fromjson) as $events
+        | if all($events[];
+            type == "object" and .schema_version == $sv and .issue == $issue
+            and .event == "ack-unknown"
+            and ((.invocation_id | type) == "string")
+            and (.invocation_id | test("^inv-v1-[0-9a-f]{24}$"))
+            and ((.ts | type) == "string") and (.ts | length) > 0)
+          then [$events[].invocation_id] | unique | sort
+          else error("invalid acknowledgement record") end
+      ' <<<"$acks_raw" 2>/dev/null)"; then
+      any_corrupt=1
+      acknowledged_ids="[]"
+    fi
+  fi
   local f
   for f in "$dir"/*.json; do
     [[ -e "$f" || -L "$f" ]] || continue
@@ -1025,8 +1049,13 @@ accounting_admission_query() {
         ;;
       usage-unknown)
         : # accounting-branch: B071
-        unknown_json="$(jq -c --arg id "$id" '. + [$id]' <<<"$unknown_json")"
-        unknown_count=$((unknown_count + 1))
+        all_unknown_json="$(jq -c --arg id "$id" '. + [$id]' <<<"$all_unknown_json")"
+        if jq -e --arg id "$id" 'index($id) != null' <<<"$acknowledged_ids" >/dev/null 2>&1; then
+          acknowledged_unknown_json="$(jq -c --arg id "$id" '. + [$id]' <<<"$acknowledged_unknown_json")"
+        else
+          unknown_json="$(jq -c --arg id "$id" '. + [$id]' <<<"$unknown_json")"
+          unknown_count=$((unknown_count + 1))
+        fi
         ;;
       *)
         : # accounting-branch: B072
@@ -1039,10 +1068,17 @@ accounting_admission_query() {
       '. + [{id:$id, state:$state, total_tokens:$tk}]' <<<"$scan_json")"
   done
 
-  local sorted digest ids_sorted
+  acknowledged_unknown_json="$(jq -c 'unique | sort' <<<"$acknowledged_unknown_json")"
+  all_unknown_json="$(jq -c 'unique | sort' <<<"$all_unknown_json")"
+  if ! jq -ne --argjson acks "$acknowledged_ids" --argjson unknowns "$all_unknown_json" '($acks - $unknowns) | length == 0' >/dev/null 2>&1; then
+    any_corrupt=1
+  fi
+
+  local sorted digest ids_sorted digest_input
   sorted="$(jq -c 'sort_by(.id)' <<<"$scan_json")"
   ids_sorted="$(jq -c '[.[].id] | sort' <<<"$scan_json")"
-  if ! digest="$(_accounting_sha256 "$sorted")" || [[ -z "$digest" ]]; then
+  digest_input="$(jq -nc --argjson records "$sorted" --argjson acknowledged "$acknowledged_unknown_json" '{records:$records,acknowledged_unknown_invocations:$acknowledged}')"
+  if ! digest="$(_accounting_sha256 "$digest_input")" || [[ -z "$digest" ]]; then
     echo "accounting_admission_query: cannot compute source digest for issue ${issue}" >&2
     _accounting_unlock _lock_fd
     _accounting_unavailable_json
@@ -1074,11 +1110,13 @@ accounting_admission_query() {
       --argjson sv "$ACCOUNTING_SCHEMA_VERSION" \
       --argjson total "$total" \
       --argjson ids "$ids_sorted" \
+      --argjson acknowledged "$acknowledged_unknown_json" \
       --arg digest "$digest" '
         type == "object"
         and .schema_version == $sv
         and .total_tokens == $total
         and .source_invocation_ids == $ids
+        and .acknowledged_unknown_invocations == $acknowledged
         and .digest == $digest
       ' <<<"$projection_raw" >/dev/null 2>&1; then
       need_rebuild=0 # accounting-branch: B056
@@ -1088,8 +1126,8 @@ accounting_admission_query() {
     local projection # accounting-branch: B057
     projection="$(jq -nc \
       --argjson sv "$ACCOUNTING_SCHEMA_VERSION" --argjson total "$total" \
-      --argjson ids "$ids_sorted" --arg digest "$digest" \
-      '{schema_version:$sv, total_tokens:$total, source_invocation_ids:$ids, digest:$digest}')"
+      --argjson ids "$ids_sorted" --argjson acknowledged "$acknowledged_unknown_json" --arg digest "$digest" \
+      '{schema_version:$sv, total_tokens:$total, source_invocation_ids:$ids, acknowledged_unknown_invocations:$acknowledged, digest:$digest}')"
     if [[ -z "$projection" ]] || ! _accounting_write_atomic "$dir" "$proj_file" "$projection"; then
       echo "accounting_admission_query: failed to rebuild projection for issue ${issue}" >&2
       _accounting_unlock _lock_fd
@@ -1101,8 +1139,8 @@ accounting_admission_query() {
   local result
   result="$(jq -nc \
     --arg status "$status" --argjson total "$total" --arg digest "$digest" \
-    --argjson open "$open_json" --argjson unknown "$unknown_json" \
-    '{status:$status, total_tokens:$total, source_digest:$digest, open_invocations:$open, unknown_invocations:$unknown}')"
+    --argjson open "$open_json" --argjson unknown "$unknown_json" --argjson acknowledged "$acknowledged_unknown_json" \
+    '{status:$status, total_tokens:$total, source_digest:$digest, open_invocations:$open, unknown_invocations:$unknown, acknowledged_unknown_invocations:$acknowledged}')"
   printf '%s\n' "$result"
 
   _accounting_unlock _lock_fd

@@ -5,7 +5,7 @@
 # commit (D5), lifecycle states (D4), locked full-scan query + rebuildable
 # projection cache (D2), reconciliation proof-of-death (D6), and the
 # metrics isolation + production-ingress choke-point guards.
-# Test IDs: TC-RESOURCEACCOUNT-001..080.
+# Test IDs: TC-RESOURCEACCOUNT-001..086.
 #
 # Isolation (tests/unit/README.md): every path this test touches is under a
 # fresh mktemp -d ($WORK), namespaced per invocation — safe to run
@@ -560,6 +560,9 @@ assert_eq "TC-RESOURCEACCOUNT-038 projection source ids rebuilt" "2" \
   "$(jq -r '.source_invocation_ids | length' "$PROJ")"
 
 # ---------------------------------------------------------------------------
+# Acknowledged historical unknown admission — TC-RESOURCEACCOUNT-081..086
+source "$SCRIPT_DIR/accounting-ack-admission.inc.sh"
+
 # Reconciliation (D6) — TC-RESOURCEACCOUNT-040..045
 # ---------------------------------------------------------------------------
 echo "== reconciliation =="
